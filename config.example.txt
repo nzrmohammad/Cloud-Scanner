@@ -1,0 +1,60 @@
+# ==============================================================
+# Cloud Scanner Settings (تنظیمات اسکنر کلودفلر)
+# ==============================================================
+
+# VLESS Config Link (لینک کانفیگ VLESS شما)
+vless = vless://your-uuid-here@your-domain.com:443?encryption=none&security=tls&sni=your-sni.com&fp=chrome&alpn=http%2F1.1&insecure=0&type=ws&host=your-sni.com&path=%2F#MyConfig
+
+# Target Ports to scan (پورت‌های مورد نظر برای اسکن - جدا شده با کاما)
+# برای اسکن ۶ پورت اصلی کلودفلر: 443, 8443, 2053, 2083, 2087, 2096
+# برای اسکن فقط پورت داخل کانفیگ: config
+ports = 443, 8443, 2053, 2083, 2087, 2096
+
+# Scan Speed / Workers (سرعت اسکن / تعداد ورکرها)
+workers = 66
+
+# Timeout in seconds (مهلت اتصال به ثانیه)
+timeout = 2
+
+# Fast TCP Pre-filter (پیش‌فیلتر فوق سریع TCP)
+tcp_prefilter = true
+
+# Latency Test URL (آدرس تست پینگ و اتصال)
+test_url = https://www.gstatic.com/generate_204
+
+# Maximum target IPs to load/scan (حداکثر تعداد آی‌پی برای اسکن)
+# عدد 0 یا unlimited یعنی تمام آی‌پی‌ها بدون محدودیت اسکن شوند؛ یا یک عدد دلخواه (مثلاً 500 یا 1000)
+max_targets = 0
+
+# ==============================================================
+# Quality & Speed Testing Settings (تنظیمات تست کیفیت و سرعت)
+# ==============================================================
+# Post-scan test mode: full | stability | speed | none
+# full: Stability (Loss% + Jitter) + Download & Upload Speed
+# stability: Stability (Loss% + Jitter) only
+# speed: Download & Upload Speed only
+# none: Skip post-scan testing
+post_scan_mode = full
+
+# Top targets count to test for quality & speed (تعداد برترین اهداف جهت تست سرعت و پایداری)
+# عدد 0 یا all یعنی تمام آی‌پی‌های سالم پیدا شده تست شوند؛ یا یک عدد (مثلاً 10 یا 20) برای گلچین برترین‌ها بر اساس کمترین پینگ
+top_targets = 10
+
+# Ping samples for stability & jitter test (تعداد پینگ تست پایداری و جیتر)
+ping_samples = 5
+
+# Anti-Drop / Longevity endurance test (تست مقاومت در برابر قطع شدن توسط فیلترینگ DPI)
+# بررسی زنده ماندن اتصال در طول زمان و عدم ارسال پکت‌های قطع اتصال (TCP RST)
+longevity_test = true
+
+# Longevity test duration in seconds (مدت زمان تست پایداری مداوم به ثانیه)
+longevity_duration = 15
+
+# Download test size in MB (حجم فایل دانلود تستی بر حسب مگابایت)
+download_mb = 5
+
+# Upload test size in MB (حجم فایل آپلود تستی بر حسب مگابایت - عدد 0 یعنی غیرفعال)
+upload_mb = 1
+
+# Max test duration per IP in seconds (محدودیت زمان تست سرعت)
+speed_duration = 5

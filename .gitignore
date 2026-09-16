@@ -1,0 +1,67 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# C extensions
+*.so
+
+# Distribution / packaging
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual Environments
+venv/
+.venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+
+# Binaries & Core Files (Keep repo lightweight)
+core/
+bin/
+xray
+xray.exe
+*.exe
+*.dat
+geoip.dat
+geosite.dat
+
+# Scan Results & Temporary Configs
+results/
+Custom/
+configs/temp/
+*.log
+
+# Editor & OS files
+.idea/
+.vscode/
+*.sublime-project
+*.sublime-workspace
+.DS_Store
+Thumbs.db
+
+# Agent & Scratch artifacts
+.gemini/
+scratch/
+Help.txt
+
+# Private User Configuration (Never commit private VLESS keys)
+config.txt
