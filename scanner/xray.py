@@ -296,7 +296,10 @@ class XrayProcess:
         self.proc: Optional[subprocess.Popen] = None
 
     def __enter__(self) -> "XrayProcess":
-        self.temp_dir = tempfile.TemporaryDirectory(prefix="rkh_cfs_")
+        try:
+            self.temp_dir = tempfile.TemporaryDirectory(prefix="rkh_cfs_", ignore_cleanup_errors=True)
+        except TypeError:
+            self.temp_dir = tempfile.TemporaryDirectory(prefix="rkh_cfs_")
         cfg_path = Path(self.temp_dir.name) / "config.json"
         config_dict = make_xray_config(
             self.vless_config,
@@ -319,7 +322,7 @@ class XrayProcess:
         )
         if not wait_port(self.socks_port, self.ready_timeout):
             self.close()
-            raise RuntimeError("Xray SOCKS port did not start in time")
+            raise TimeoutError("Xray did not open SOCKS port within timeout")
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
@@ -330,12 +333,15 @@ class XrayProcess:
         if self.proc is not None:
             try:
                 self.proc.terminate()
-                self.proc.wait(timeout=1.5)
+                self.proc.wait(timeout=1.0)
             except Exception:
-                try:
+                pass
+            try:
+                if self.proc.poll() is None:
                     self.proc.kill()
-                except Exception:
-                    pass
+                    self.proc.wait(timeout=0.5)
+            except Exception:
+                pass
             self.proc = None
 
         if self.temp_dir is not None:

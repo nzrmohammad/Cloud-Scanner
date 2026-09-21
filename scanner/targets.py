@@ -4,7 +4,7 @@ from bisect import bisect_right
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Tuple
 
-from scanner.constants import MAX_DEFAULT_HOSTS, isp_root
+from scanner.constants import MAX_DEFAULT_HOSTS, app_dir, isp_root
 from scanner.models import TargetSource
 
 
@@ -31,6 +31,40 @@ def _network_host_bounds(net: ipaddress._BaseNetwork) -> Tuple[int, int]:
     return start, end
 
 
+def parse_ip_and_port(token: str) -> Tuple[str, Optional[int]]:
+    """Extract host IP string and optional port from a token.
+    Supports IPv4, [IPv6]:port, bare IPv6, and IPv4:port.
+    """
+    token = token.strip()
+    if token.startswith("[") and "]:" in token:
+        bracket_idx = token.index("]:")
+        host = token[1:bracket_idx]
+        port_s = token[bracket_idx + 2:]
+        try:
+            p = int(port_s)
+            if 1 <= p <= 65535:
+                return host, p
+        except ValueError:
+            pass
+        return host, None
+    if token.startswith("[") and token.endswith("]"):
+        return token[1:-1], None
+    if ":" in token and "/" not in token and "-" not in token:
+        try:
+            ipaddress.IPv6Address(token)
+            return token, None
+        except ValueError:
+            host, sep, port_s = token.rpartition(":")
+            if host:
+                try:
+                    p = int(port_s)
+                    if 1 <= p <= 65535:
+                        return host, p
+                except ValueError:
+                    pass
+    return token, None
+
+
 def _target_sources(items: Iterable[str]) -> List[TargetSource]:
     sources: List[TargetSource] = []
     for item in items:
@@ -38,6 +72,11 @@ def _target_sources(items: Iterable[str]) -> List[TargetSource]:
         if not raw_item:
             continue
         p = Path(raw_item)
+        if not p.is_absolute():
+            if not (p.exists() and p.is_file()):
+                alt_p = app_dir() / raw_item
+                if alt_p.exists() and alt_p.is_file():
+                    p = alt_p
         if p.exists() and p.is_file():
             lines = p.read_text(encoding="utf-8", errors="ignore").splitlines()
             sources.extend(_target_sources(lines))
@@ -58,8 +97,10 @@ def _target_sources(items: Iterable[str]) -> List[TargetSource]:
                 raise ValueError(f"Invalid IP range: {token}")
             sources.append(TargetSource(start=int(start_ip), end=int(end_ip), version=start_ip.version, label=token))
             continue
-        ip = ipaddress.ip_address(token)
-        sources.append(TargetSource(start=int(ip), end=int(ip), version=ip.version, label=token))
+
+        host_str, port = parse_ip_and_port(token)
+        ip = ipaddress.ip_address(host_str)
+        sources.append(TargetSource(start=int(ip), end=int(ip), version=ip.version, label=token, port=port))
     return sources
 
 
@@ -69,11 +110,16 @@ def _expand_sources_exact(sources: List[TargetSource], max_hosts: Optional[int] 
     limited = max_hosts is not None and max_hosts > 0
     for src in sources:
         for n in range(src.start, src.end + 1):
-            ip = str(ipaddress.ip_address(n))
-            if ip in seen:
+            ip_obj = ipaddress.ip_address(n)
+            ip_str = str(ip_obj)
+            if src.port is not None:
+                item_str = f"[{ip_str}]:{src.port}" if ip_obj.version == 6 else f"{ip_str}:{src.port}"
+            else:
+                item_str = ip_str
+            if item_str in seen:
                 continue
-            seen.add(ip)
-            out.append(ip)
+            seen.add(item_str)
+            out.append(item_str)
             if limited and len(out) > int(max_hosts):
                 raise ValueError(
                     f"Too many targets. Current limit is {max_hosts}. Use max_targets in config.txt to raise it."
@@ -134,10 +180,15 @@ def _sample_sources_evenly(sources: List[TargetSource], max_hosts: int) -> List[
             prev = cumulative[idx - 1] if idx > 0 else 0
             src = version_sources[idx]
             n = src.start + (pos - prev)
-            ip = str(ipaddress.ip_address(n))
-            if ip not in seen:
-                seen.add(ip)
-                out.append(ip)
+            ip_obj = ipaddress.ip_address(n)
+            ip_str = str(ip_obj)
+            if src.port is not None:
+                item_str = f"[{ip_str}]:{src.port}" if ip_obj.version == 6 else f"{ip_str}:{src.port}"
+            else:
+                item_str = ip_str
+            if item_str not in seen:
+                seen.add(item_str)
+                out.append(item_str)
     return out[:max_hosts]
 
 

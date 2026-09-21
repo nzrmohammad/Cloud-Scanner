@@ -36,6 +36,7 @@ from scanner.models import (
     VlessConfig,
 )
 from scanner.storage import save_results
+from scanner.targets import parse_ip_and_port
 from scanner.ui.terminal import RICH, console, cprint, render_stage
 from scanner.xray import XrayProcess, free_port, make_xray_config, wait_port
 
@@ -122,6 +123,63 @@ def fast_tcp_filter(
     return alive
 
 
+def make_temp_dir(prefix: str) -> tempfile.TemporaryDirectory:
+    """Create TemporaryDirectory with ignore_cleanup_errors=True if supported."""
+    try:
+        return tempfile.TemporaryDirectory(prefix=prefix, ignore_cleanup_errors=True)
+    except TypeError:
+        return tempfile.TemporaryDirectory(prefix=prefix)
+
+
+def safe_stop_proc(proc: Optional[subprocess.Popen]) -> None:
+    """Safely terminate and kill subprocess, waiting for process handle to release."""
+    if proc is not None:
+        try:
+            proc.terminate()
+            proc.wait(timeout=0.5)
+        except Exception:
+            pass
+        try:
+            if proc.poll() is None:
+                proc.kill()
+                proc.wait(timeout=0.5)
+        except Exception:
+            pass
+
+
+def safe_cleanup_dir(temp_dir_obj: Optional[tempfile.TemporaryDirectory]) -> None:
+    """Safely delete TemporaryDirectory ignoring any Windows locking permission errors."""
+    if temp_dir_obj is not None:
+        try:
+            temp_dir_obj.cleanup()
+        except Exception:
+            pass
+
+
+def save_tcp_alive_endpoints(
+    alive_endpoints: List[Tuple[str, int]],
+    output_dir: Optional[Path] = None,
+) -> Tuple[Path, Path]:
+    """Save TCP-prefiltered alive endpoints (IP:port) and unique IPs to files."""
+    if output_dir is None:
+        output_dir = app_dir() / "results"
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    tcp_alive_file = output_dir / "tcp_alive.txt"
+    tcp_ips_file = output_dir / "tcp_alive_ips.txt"
+
+    # Save endpoints as ip:port
+    endpoint_lines = [f"[{ip}]:{port}" if ":" in ip else f"{ip}:{port}" for ip, port in alive_endpoints]
+    tcp_alive_file.write_text("\n".join(endpoint_lines) + "\n", encoding="utf-8")
+
+    # Save unique IPs
+    unique_ips = list(dict.fromkeys(ip for ip, _ in alive_endpoints))
+    tcp_ips_file.write_text("\n".join(unique_ips) + "\n", encoding="utf-8")
+
+    return tcp_alive_file, tcp_ips_file
+
+
 def test_ip(
     v: VlessConfig,
     ip: str,
@@ -137,7 +195,7 @@ def test_ip(
     last_error = ""
     for _ in range(max(1, tries)):
         socks_port = free_port()
-        temp_dir_obj = tempfile.TemporaryDirectory(prefix="rkh_cfs_")
+        temp_dir_obj = make_temp_dir(prefix="rkh_cfs_")
         temp_dir = Path(temp_dir_obj.name)
         cfg_path = temp_dir / "config.json"
         cfg_path.write_text(
@@ -172,20 +230,15 @@ def test_ip(
         except Exception as exc:
             last_error = str(exc).split("\n", 1)[0][:160]
         finally:
-            if proc is not None:
-                try:
-                    proc.terminate()
-                    proc.wait(timeout=1)
-                except Exception:
-                    try:
-                        proc.kill()
-                    except Exception:
-                        pass
+            safe_stop_proc(proc)
             if keep_configs:
-                keep_dir = app_dir() / "configs" / "temp"
-                keep_dir.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(cfg_path, keep_dir / f"{ip.replace(':', '_')}_{port}_{int(time.time())}.json")
-            temp_dir_obj.cleanup()
+                try:
+                    keep_dir = app_dir() / "configs" / "temp"
+                    keep_dir.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(cfg_path, keep_dir / f"{ip.replace(':', '_')}_{port}_{int(time.time())}.json")
+                except Exception:
+                    pass
+            safe_cleanup_dir(temp_dir_obj)
     return ScanResult(ip=ip, port=port, ok=False, error=last_error or "Failed")
 
 
@@ -206,7 +259,7 @@ def speed_test_ip(
     ip = base_result.ip
     port = base_result.port
     socks_port = free_port()
-    temp_dir_obj = tempfile.TemporaryDirectory(prefix="rkh_cfs_speed_")
+    temp_dir_obj = make_temp_dir(prefix="rkh_cfs_speed_")
     temp_dir = Path(temp_dir_obj.name)
     cfg_path = temp_dir / "config.json"
     cfg_path.write_text(
@@ -305,16 +358,8 @@ def speed_test_ip(
             out.upload_error = err_msg
         return out
     finally:
-        if proc is not None:
-            try:
-                proc.terminate()
-                proc.wait(timeout=1)
-            except Exception:
-                try:
-                    proc.kill()
-                except Exception:
-                    pass
-        temp_dir_obj.cleanup()
+        safe_stop_proc(proc)
+        safe_cleanup_dir(temp_dir_obj)
 
 
 def run_speed_tests(
@@ -582,7 +627,7 @@ def longevity_test_ip(
     ip = base_result.ip
     port = base_result.port
     socks_port = free_port()
-    temp_dir_obj = tempfile.TemporaryDirectory(prefix="rkh_cfs_long_")
+    temp_dir_obj = make_temp_dir(prefix="rkh_cfs_long_")
     temp_dir = Path(temp_dir_obj.name)
     cfg_path = temp_dir / "config.json"
     cfg_path.write_text(
@@ -677,16 +722,8 @@ def longevity_test_ip(
         out.error = str(exc).split("\n", 1)[0][:160]
         return out
     finally:
-        if proc is not None:
-            try:
-                proc.terminate()
-                proc.wait(timeout=1)
-            except Exception:
-                try:
-                    proc.kill()
-                except Exception:
-                    pass
-        temp_dir_obj.cleanup()
+        safe_stop_proc(proc)
+        safe_cleanup_dir(temp_dir_obj)
 
 
 def run_longevity_tests(
@@ -806,9 +843,22 @@ def run_scan(
     loglevel: str = "warning",
     keep_configs: bool = False,
     use_tcp_prefilter: bool = True,
+    output_dir: Optional[Path] = None,
 ) -> List[ScanResult]:
     """Execute complete initial scan across targets and ports."""
-    target_pairs: List[Tuple[str, int]] = [(ip, p) for ip in targets for p in ports]
+    target_pairs: List[Tuple[str, int]] = []
+    seen_pairs = set()
+    for t in targets:
+        host, explicit_port = parse_ip_and_port(t)
+        if explicit_port is not None:
+            if (host, explicit_port) not in seen_pairs:
+                seen_pairs.add((host, explicit_port))
+                target_pairs.append((host, explicit_port))
+        else:
+            for p in ports:
+                if (host, p) not in seen_pairs:
+                    seen_pairs.add((host, p))
+                    target_pairs.append((host, p))
     if not target_pairs:
         return []
 
@@ -818,6 +868,11 @@ def run_scan(
         if alive:
             cprint(f"TCP pre-filter passed: {len(alive)} / {len(target_pairs)} endpoints", "green")
             target_pairs = alive
+            try:
+                alive_file, ips_file = save_tcp_alive_endpoints(alive, output_dir=output_dir)
+                cprint(f"Saved {len(alive)} TCP-alive endpoints to: {alive_file.name} & {ips_file.name}", "cyan")
+            except Exception as e:
+                cprint(f"Warning: Could not save TCP-alive endpoints: {e}", "yellow")
         else:
             cprint("No endpoints passed TCP pre-filter. Testing all endpoints directly with Xray...", "yellow")
 
@@ -839,7 +894,11 @@ def run_scan(
             try:
                 futures = {ex.submit(test_ip, v, ip, p, xray, timeout, tries, url, loglevel, keep_configs): (ip, p) for ip, p in target_pairs}
                 for fut in as_completed(futures):
-                    r = fut.result()
+                    try:
+                        r = fut.result()
+                    except Exception as exc:
+                        f_ip, f_port = futures.get(fut, ("unknown", 0))
+                        r = ScanResult(ip=f_ip, port=f_port, ok=False, error=str(exc)[:160])
                     results.append(r)
                     if r.ok:
                         console.print(f"[green]OK[/green]  {r.endpoint:<45} [bold]{r.latency_ms:.1f} ms[/bold]  HTTP {r.status_code}")
@@ -858,7 +917,11 @@ def run_scan(
         try:
             futures = {ex.submit(test_ip, v, ip, p, xray, timeout, tries, url, loglevel, keep_configs): (ip, p) for ip, p in target_pairs}
             for fut in as_completed(futures):
-                r = fut.result()
+                try:
+                    r = fut.result()
+                except Exception as exc:
+                    f_ip, f_port = futures.get(fut, ("unknown", 0))
+                    r = ScanResult(ip=f_ip, port=f_port, ok=False, error=str(exc)[:160])
                 results.append(r)
                 done += 1
                 if r.ok:
@@ -884,7 +947,7 @@ def resolve_endpoint_colo(
 ) -> Optional[str]:
     """Query https://cloudflare.com/cdn-cgi/trace via Xray proxy to detect Cloudflare edge PoP (Colo)."""
     socks_port = free_port()
-    temp_dir_obj = tempfile.TemporaryDirectory(prefix="rkh_cfs_colo_")
+    temp_dir_obj = make_temp_dir(prefix="rkh_cfs_colo_")
     temp_dir = Path(temp_dir_obj.name)
     cfg_path = temp_dir / "config.json"
     cfg_path.write_text(
@@ -915,16 +978,8 @@ def resolve_endpoint_colo(
     except Exception:
         return None
     finally:
-        if proc is not None:
-            try:
-                proc.terminate()
-                proc.wait(timeout=1)
-            except Exception:
-                try:
-                    proc.kill()
-                except Exception:
-                    pass
-        temp_dir_obj.cleanup()
+        safe_stop_proc(proc)
+        safe_cleanup_dir(temp_dir_obj)
 
 
 def enrich_results_with_colo(
@@ -1191,6 +1246,7 @@ class ScannerEngine:
         timeout: int = 2,
         url: str = "https://cp.cloudflare.com/generate_204",
         use_tcp_prefilter: bool = True,
+        output_dir: Optional[Path] = None,
     ) -> List[ScanResult]:
         if not self.xray_path:
             raise FileNotFoundError("Xray executable not found")
@@ -1203,6 +1259,7 @@ class ScannerEngine:
             timeout=timeout,
             url=url,
             use_tcp_prefilter=use_tcp_prefilter,
+            output_dir=output_dir,
         )
 
     def recheck(

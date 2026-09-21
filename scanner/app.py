@@ -191,6 +191,7 @@ class CloudScannerApp:
                             "warning",
                             False,
                             use_tcp_prefilter=settings.tcp_prefilter,
+                            output_dir=output_dir,
                         )
                         txt, csvp = save_results(results, output_dir, "clean_ips", vless_config=v)
                         render_stage("Scan Results", "Latency scan finished. Results are saved below.", "green")
@@ -289,6 +290,7 @@ class CloudScannerApp:
                 args.loglevel,
                 args.keep_configs,
                 use_tcp_prefilter=use_tcp_prefilter,
+                output_dir=Path(args.output_dir),
             )
             txt, csvp = save_results(results, Path(args.output_dir), "clean_ips", vless_config=v)
         except ScanInterrupted as interrupted:

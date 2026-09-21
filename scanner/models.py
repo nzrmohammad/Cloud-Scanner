@@ -50,6 +50,7 @@ class TargetSource:
     end: int
     version: int
     label: str = ""
+    port: Optional[int] = None
 
     @property
     def size(self) -> int:
