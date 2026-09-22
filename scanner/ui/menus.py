@@ -74,13 +74,13 @@ def render_key_menu(
             console.print(top_panel)
             console.print()
         table = Table(title=title, box=box.ROUNDED, border_style="bright_blue")
-        table.add_column("", justify="center", width=3)
+        table.add_column("", justify="center", width=4)
         table.add_column("#", justify="right", width=4, style="cyan")
         table.add_column("Item", style="bold white")
         table.add_column("Info", style="dim")
         for i, (name, detail) in enumerate(rows):
-            marker = "●" if i == cursor else " "
-            check = "☑" if i in selected else "☐"
+            marker = ">" if i == cursor else " "
+            check = "[x]" if i in selected else "[ ]"
             icon = check if multi else marker
             row_style = "bold black on cyan" if i == cursor else ("green" if i in selected else "")
             table.add_row(icon, str(i + 1), name, detail, style=row_style)

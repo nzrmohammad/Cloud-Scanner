@@ -200,6 +200,30 @@ Results are saved to the `results/` folder:
 
 ---
 
+## 🌐 Managing & Adding IP Ranges (مدیریت و افزودن رنج‌های دلخواه)
+
+Cloud Scanner features an automatic range discovery system:
+
+### Directory Structure:
+- **`ip-ranges/iran/`**: Iranian ISPs, Datacenters, and VPS Cloud Hosting providers (ArvanCloud, IranServer, Parspack, Mobinhost, Asiatech, etc.).
+- **`ip-ranges/international/`**: Global Cloud & VPS providers (Gcore, Hetzner, OVH, DigitalOcean, Linode, Vultr, Leaseweb, Netcup, etc.).
+- **`ip-ranges/ipv6/`**: Cloudflare Official IPv6 CIDRs and clean subnets.
+
+### How to Add a New Provider / Range:
+1. Create a new `.txt` file inside the appropriate directory (`ip-ranges/iran/` or `ip-ranges/international/`). The file name will automatically become the menu item name (e.g., `MyCustomHost.txt`).
+2. Inside the file, add your IP targets, one per line. The following formats are supported:
+   - **CIDR Subnets**: `185.14.160.0/24` or `2606:4700::/32`
+   - **IP Ranges**: `1.1.1.1-1.1.1.50`
+   - **Single IPs**: `104.16.1.1`
+   - **Endpoints with Ports**: `104.16.1.1:443`
+3. Save the file. Run `python main.py` and navigate to **Target Source -> ISP range list**. Your new provider will appear instantly!
+
+### How to Edit or Remove:
+- **To edit**: Simply open any existing `.txt` file, add or remove subnets, and save.
+- **To remove**: Delete the `.txt` file from the directory, and it will immediately disappear from the menu.
+
+---
+
 ## 👨‍💻 Community & License
 
 - **Author**: Mohammad
