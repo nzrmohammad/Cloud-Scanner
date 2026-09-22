@@ -279,9 +279,9 @@ def select_manual_targets_tui() -> Tuple[List[str], str]:
 
 def choose_isp_category_tui() -> str:
     categories = [
-        ("iran", "Iranian ISPs"),
-        ("international", "International ISPs"),
-        ("ipv6", "Cloudflare IPv6 Ranges"),
+        ("iran", ISP_CATEGORIES.get("iran", "Iranian ISPs & Datacenters")),
+        ("international", ISP_CATEGORIES.get("international", "International ISPs & Clouds")),
+        ("ipv6", ISP_CATEGORIES.get("ipv6", "IPv6 Ranges (Cloudflare & Clouds)")),
     ]
     rows = []
     for cat_id, label in categories:

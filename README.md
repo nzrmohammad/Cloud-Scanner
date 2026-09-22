@@ -200,7 +200,7 @@ Results are saved to the `results/` folder:
 
 ---
 
-## 🌐 Managing & Adding IP Ranges (مدیریت و افزودن رنج‌های دلخواه)
+## 🌐 Managing & Adding IP Ranges
 
 Cloud Scanner features an automatic range discovery system:
 

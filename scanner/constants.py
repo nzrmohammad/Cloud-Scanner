@@ -27,9 +27,9 @@ LATENCY_TEST_URLS = [
 ]
 
 ISP_CATEGORIES = {
-    "iran": "Iranian ISPs",
-    "international": "International ISPs",
-    "ipv6": "Cloudflare IPv6 Ranges",
+    "iran": "Iranian ISPs & Datacenters",
+    "international": "International ISPs & Clouds",
+    "ipv6": "IPv6 Ranges (Cloudflare & Clouds)",
 }
 
 DEFAULT_CONFIG_FILENAME = "config.txt"
