@@ -86,13 +86,14 @@ def fast_tcp_filter(
     max_w = min(workers, total)
     if RICH and console is not None and Progress is not None:
         progress = Progress(
-            SpinnerColumn(),
+            SpinnerColumn("line", style="bold cyan"),
             TextColumn("[bold cyan]{task.description}"),
             BarColumn(),
             TextColumn("{task.completed}/{task.total}"),
             TextColumn("[green]Passed: {task.fields[passed]}[/green]"),
             TimeElapsedColumn(),
             console=console,
+            refresh_per_second=10,
         )
         with progress:
             task = progress.add_task("TCP Pre-filtering", total=total, passed=0)
@@ -387,12 +388,13 @@ def run_speed_tests(
         duration_text = f" | up to {speed_duration}s per IP" if speed_duration > 0 else ""
         title = f"Speed testing: {mb_down:.1f}MB download{up_info} per IP{duration_text}"
         progress = Progress(
-            SpinnerColumn(),
+            SpinnerColumn("line", style="bold yellow"),
             TextColumn("[bold yellow]{task.description}"),
             BarColumn(),
             TextColumn("{task.completed}/{task.total}"),
             TimeElapsedColumn(),
             console=console,
+            refresh_per_second=10,
         )
         with progress:
             task = progress.add_task(title, total=len(targets))
@@ -551,12 +553,13 @@ def run_latency_recheck(
     if RICH and console is not None and Progress is not None:
         title = f"Re-checking stability: {sample_count} real Xray test(s) per IP"
         progress = Progress(
-            SpinnerColumn(),
+            SpinnerColumn("line", style="bold magenta"),
             TextColumn("[bold magenta]{task.description}"),
             BarColumn(),
             TextColumn("{task.completed}/{task.total}"),
             TimeElapsedColumn(),
             console=console,
+            refresh_per_second=10,
         )
         with progress:
             task = progress.add_task(title, total=len(targets))
@@ -746,12 +749,13 @@ def run_longevity_tests(
     if RICH and console is not None and Progress is not None:
         title = f"Anti-Drop Testing: {duration}s DPI endurance per IP"
         progress = Progress(
-            SpinnerColumn(),
+            SpinnerColumn("line", style="bold green"),
             TextColumn("[bold green]{task.description}"),
             BarColumn(),
             TextColumn("{task.completed}/{task.total}"),
             TimeElapsedColumn(),
             console=console,
+            refresh_per_second=10,
         )
         with progress:
             task = progress.add_task(title, total=len(targets))
@@ -880,12 +884,13 @@ def run_scan(
     render_stage("Xray Latency Scan", f"Testing {len(target_pairs)} endpoint(s) with Xray...", "cyan")
     if RICH and console is not None and Progress is not None:
         progress = Progress(
-            SpinnerColumn(),
+            SpinnerColumn("line", style="bold cyan"),
             TextColumn("[bold cyan]{task.description}"),
             BarColumn(),
             TextColumn("{task.completed}/{task.total}"),
             TimeElapsedColumn(),
             console=console,
+            refresh_per_second=10,
         )
         with progress:
             task = progress.add_task("Scanning", total=len(target_pairs))

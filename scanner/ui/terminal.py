@@ -51,13 +51,17 @@ def cprint(text: str = "", style: Optional[str] = None) -> None:
 
 
 def clear_screen() -> None:
+    if os.name == "nt":
+        try:
+            os.system("cls")
+            return
+        except Exception:
+            pass
     if sys.stdout.isatty():
         try:
-            if os.name == "nt":
-                os.system("cls")
-            else:
-                sys.stdout.write("\033[2J\033[H\033[3J")
-                sys.stdout.flush()
+            sys.stdout.write("\033[2J\033[H\033[3J")
+            sys.stdout.flush()
+            return
         except Exception:
             pass
     if RICH and console is not None:
@@ -66,8 +70,8 @@ def clear_screen() -> None:
             return
         except Exception:
             pass
-    if not sys.stdout.isatty():
-        print("\n" * 2, end="")
+    print("\n" * 2, end="")
+
 
 
 def render_fixed_header(compact: bool = True, show_controls: bool = True) -> None:

@@ -17,7 +17,7 @@ def read_key() -> str:
         ch = msvcrt.getwch()
         if ch in {"\x00", "\xe0"}:
             ch2 = msvcrt.getwch()
-            return {"H": "up", "P": "down", "K": "left", "M": "right"}.get(ch2, "")
+            return {"H": "up", "P": "down", "K": "left", "M": "right", "I": "page_up", "Q": "page_down"}.get(ch2, "")
         if ch == "\r":
             return "enter"
         if ch == "\x1b":
