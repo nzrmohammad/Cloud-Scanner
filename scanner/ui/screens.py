@@ -82,7 +82,7 @@ def make_active_settings_panel(v: Optional[VlessConfig], settings: Optional[AppS
         return None
     ports_str = ", ".join(str(p) for p in (settings.ports if settings.ports else [v.port]))
     mode_str = settings.post_scan_mode.upper()
-    max_t_str = "Unlimited (∞)" if settings.max_targets == 0 else str(settings.max_targets)
+    max_t_str = "Unlimited" if settings.max_targets == 0 else str(settings.max_targets)
     top_t_desc = "All working IPs" if settings.top_targets == 0 else f"Top {settings.top_targets}"
     details = (
         f"[bold cyan]Config Remark:[/bold cyan] {v.remark} ([green]{v.host}:{v.port}[/green])\n"
@@ -132,7 +132,7 @@ def render_welcome_config_screen(
             if settings:
                 ports_str = ", ".join(str(p) for p in (settings.ports if settings.ports else [parsed_saved.port]))
                 mode_str = settings.post_scan_mode.upper()
-                max_t_str = "Unlimited (∞)" if settings.max_targets == 0 else str(settings.max_targets)
+                max_t_str = "Unlimited" if settings.max_targets == 0 else str(settings.max_targets)
                 top_t_desc = "All working IPs" if settings.top_targets == 0 else f"Top {settings.top_targets}"
                 help_text = (
                     f"[bold green]Saved VLESS config found in config.txt[/bold green] -> {info}\n"
@@ -225,9 +225,9 @@ def ask_max_targets(default: int = MAX_DEFAULT_HOSTS) -> int:
     while True:
         try:
             if RICH and Prompt is not None:
-                raw = Prompt.ask("[bold yellow]Maximum targets to load/scan[/bold yellow] [dim](default ∞, b=back)[/dim]", default="")
+                raw = Prompt.ask("[bold yellow]Maximum targets to load/scan[/bold yellow] [dim](default unlimited, b=back)[/dim]", default="")
             else:
-                raw = input("Maximum targets to load/scan (default ∞, b=back): ").strip()
+                raw = input("Maximum targets to load/scan (default unlimited, b=back): ").strip()
             raw = (raw or "").strip().lower()
             if not raw or raw == "0":
                 return 0
@@ -258,7 +258,7 @@ def select_manual_targets_tui() -> Tuple[List[str], str]:
     lines: List[str] = []
     while True:
         try:
-            raw = input("› ").strip()
+            raw = input("> ").strip()
         except EOFError:
             raw = ""
         if not raw:

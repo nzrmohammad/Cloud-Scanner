@@ -421,9 +421,9 @@ def run_speed_tests(
                 for fut in as_completed(futures):
                     r = fut.result()
                     results.append(r)
-                    down_str = f"↓ {r.speed_mbps:.2f} Mbps" if r.speed_mbps is not None else "↓ -"
+                    down_str = f"DL {r.speed_mbps:.2f} Mbps" if r.speed_mbps is not None else "DL -"
                     if test_upload:
-                        up_str = f"↑ {r.upload_mbps:.2f} Mbps" if r.upload_mbps is not None else "↑ -"
+                        up_str = f"UP {r.upload_mbps:.2f} Mbps" if r.upload_mbps is not None else "UP -"
                         if r.speed_mbps is not None or r.upload_mbps is not None:
                             console.print(f"[bright_green]SPD[/bright_green] {r.endpoint:<38} [bold]{down_str}[/bold] | [bold cyan]{up_str}[/bold cyan]")
                         else:
@@ -468,9 +468,9 @@ def run_speed_tests(
                 r = fut.result()
                 results.append(r)
                 done += 1
-                down_str = f"↓ {r.speed_mbps:.2f} Mbps" if r.speed_mbps is not None else "↓ -"
+                down_str = f"DL {r.speed_mbps:.2f} Mbps" if r.speed_mbps is not None else "DL -"
                 if test_upload:
-                    up_str = f"↑ {r.upload_mbps:.2f} Mbps" if r.upload_mbps is not None else "↑ -"
+                    up_str = f"UP {r.upload_mbps:.2f} Mbps" if r.upload_mbps is not None else "UP -"
                     print(f"SPD {r.endpoint:<38} {down_str} | {up_str}")
                 else:
                     print(f"SPD {r.endpoint:<45} {down_str}")
@@ -781,11 +781,11 @@ def run_longevity_tests(
                     results.append(r)
                     if r.sustained:
                         console.print(
-                            f"[bright_green]SUSTAINED[/bright_green] {r.endpoint:<38} [green]🛡️ 0% drop ({duration}s endurance)[/green]"
+                            f"[bright_green]SUSTAINED[/bright_green] {r.endpoint:<38} [green][OK] 0% drop ({duration}s endurance)[/green]"
                         )
                     else:
                         console.print(
-                            f"[yellow]DPI-DROP[/yellow]  {r.endpoint:<38} [red]⚠️ {r.longevity_loss:.0f}% drop over {duration}s[/red]"
+                            f"[yellow]DPI-DROP[/yellow]  {r.endpoint:<38} [red][DROP] {r.longevity_loss:.0f}% drop over {duration}s[/red]"
                         )
                     progress.advance(task)
             except KeyboardInterrupt:
@@ -819,9 +819,9 @@ def run_longevity_tests(
                 results.append(r)
                 done += 1
                 if r.sustained:
-                    print(f"SUSTAINED {r.endpoint:<38} 🛡️ 0% drop ({duration}s)")
+                    print(f"SUSTAINED {r.endpoint:<38} [OK] 0% drop ({duration}s)")
                 else:
-                    print(f"DPI-DROP  {r.endpoint:<38} ⚠️ {r.longevity_loss:.0f}% drop")
+                    print(f"DPI-DROP  {r.endpoint:<38} [DROP] {r.longevity_loss:.0f}% drop")
                 print(f"Anti-Drop progress: {done}/{len(targets)}", end="\r")
             print()
         except KeyboardInterrupt:

@@ -111,7 +111,7 @@ def render_key_menu(
             table.add_row(icon, str(i + 1), name, detail, style=row_style)
 
         console.print(table)
-        help_text = "[bold]Enter[/bold]=confirm/select   [bold]↑/↓[/bold]=move   [bold]PgUp/PgDn[/bold]=jump 10"
+        help_text = "[bold]Enter[/bold]=confirm/select   [bold]Up/Down[/bold]=move   [bold]PgUp/PgDn[/bold]=jump 10"
         if multi:
             help_text += "   [bold]Space[/bold]=toggle   [bold]A[/bold]=all   [bold]N[/bold]=none"
         if allow_back:

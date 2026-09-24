@@ -160,7 +160,7 @@ def prompt_int(message: str, default: int, min_value: int = 1, max_value: Option
                 raise ValueError
             return value
         except Exception:
-            cprint(f"Please enter a number between {min_value} and {max_value or '∞'}.", "yellow")
+            cprint(f"Please enter a number between {min_value} and {max_value or 'unlimited'}.", "yellow")
 
 
 def prompt_confirm(message: str, default: bool = True) -> bool:
@@ -198,7 +198,7 @@ def prompt_int_nav(message: str, default: int, min_value: int = 1, max_value: Op
         except NavigationBack:
             raise
         except Exception:
-            cprint(f"Please enter a number between {min_value} and {max_value or '∞'}, or type b to go back.", "yellow")
+            cprint(f"Please enter a number between {min_value} and {max_value or 'unlimited'}, or type b to go back.", "yellow")
 
 
 def prompt_confirm_nav(message: str, default: bool = True, allow_back: bool = True) -> bool:

@@ -51,10 +51,16 @@ longevity_test = true
 longevity_duration = 15
 
 # Download test size in MB (حجم فایل دانلود تستی بر حسب مگابایت)
+# برای ADSL 16Mbps مقدار 2 یا 3 | برای 4G مقدار 5 یا 10 | برای فیبرنوری 300+ مگابیت مقدار 25 یا 50
 download_mb = 5
 
 # Upload test size in MB (حجم فایل آپلود تستی بر حسب مگابایت - عدد 0 یعنی غیرفعال)
+# برای ADSL بهتر است 0 باشد؛ برای اینترنت‌های پرسرعت 1 الی 5 مگابایت
 upload_mb = 1
 
 # Max test duration per IP in seconds (محدودیت زمان تست سرعت)
 speed_duration = 5
+
+# Speed test concurrency workers (تعداد ورکر همزمان برای تست سرعت)
+speed_workers = 5
+

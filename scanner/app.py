@@ -217,7 +217,7 @@ class CloudScannerApp:
                         render_stage("Final Results", "Testing complete. Summary of best results below.", "green")
                         show_final_results(final_results, final_txt, final_csv, filename_prefix=prefix, vless_config=v)
 
-                    pause("\n› Press Enter to view action options (Scan Again / Retest / Exit)...")
+                    pause("\n> Press Enter to view action options (Scan Again / Retest / Exit)...")
                     action = post_scan_actions_menu(v, final_results, prefix)
                     if action == "retest_same":
                         continue

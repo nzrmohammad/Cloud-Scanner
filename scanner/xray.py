@@ -166,7 +166,7 @@ def check_environment(xray_path: Optional[Path], show_help: bool = True) -> bool
             table.add_row(name, status)
         console.print(table)
         if update_notice:
-            console.print(f"[dim yellow]💡 {update_notice}[/dim yellow]")
+            console.print(f"[dim yellow][*] {update_notice}[/dim yellow]")
     except ImportError:
         for name, status in rows:
             print(f"{name}: {status}")

@@ -21,7 +21,9 @@
 - [Prerequisites & Installation](#-prerequisites--installation)
 - [Quick Start](#-quick-start)
 - [Configuration Guide (`config.txt`)](#-configuration-guide-configtxt)
+- [Speed Testing & Bandwidth Tuning Guide](#-speed-testing--bandwidth-tuning-guide)
 - [Output Formats](#-output-formats)
+- [Managing & Adding IP Ranges](#-managing--adding-ip-ranges)
 - [Community & License](#-community--license)
 
 ---
@@ -184,6 +186,37 @@ You can edit `config.txt` to customize default behavior:
 | `download_mb` | `5` | Download speed test size in megabytes. |
 | `upload_mb` | `1` | Upload speed test size in megabytes (`0` to skip). |
 | `speed_duration` | `5` | Speed test timeout per IP in seconds. |
+| `speed_workers` | `5` | Concurrency workers for speed testing. |
+
+---
+
+### ⚡ Speed Testing & Bandwidth Tuning Guide
+
+Fine-tuning speed test parameters in `config.txt` depends directly on your connection bandwidth. The table below outlines recommended settings for different network speeds:
+
+| Connection Type | Nominal Bandwidth | `download_mb` | `upload_mb` | `speed_duration` | `top_targets` | `speed_workers` | Notes & Recommendations |
+| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :--- |
+| **Standard ADSL / VDSL** | 8 – 24 Mbps *(~16M)* | `2` – `3` | `0` *(or `1`)* | `4` – `5` | `5` – `10` | `3` – `4` | Limited bandwidth; large test files cause timeouts. Upload test is best disabled (`0`) to prevent bufferbloat. |
+| **4G / LTE / TD-LTE Mobile** | 40 – 100 Mbps | `5` – `10` | `1` – `2` | `5` | `10` | `5` | Balanced default profile; optimal for cellular modems and standard fiber lines. |
+| **High-Speed FTTH / 5G / Fiber** | 200 – 400+ Mbps | `25` – `50` | `5` – `10` | `6` – `8` | `10` – `20` | `5` – `8` | Gigabit/fast connections require larger test chunks to ramp up TCP congestion window (CWND) and measure true throughput. |
+
+---
+
+### 💡 Technical Explanation & Best Practices:
+
+1. **Why use smaller chunks (`download_mb = 2` to `3`) for 16 Mbps (ADSL)?**
+   - 16 Mbps nominal downstream corresponds to a maximum real throughput of **~2 MB/s**.
+   - If `download_mb` is set to 10 MB or 20 MB, testing each IP will take 5 to 10 full seconds, easily exceeding `speed_duration` timeouts and causing scans to take an excessive amount of time. A compact **2–3 MB** payload provides an accurate measurement within 1–2 seconds.
+   - Upstream bandwidth on ADSL/VDSL is typically severely constrained (1–2 Mbps = ~120–250 KB/s). Running large upload tests will completely saturate the modem's transmit buffer (**bufferbloat**), generating artificial packet loss and disrupting overall home network connectivity. Therefore, setting `upload_mb = 0` (or `1`) is strongly recommended for ADSL.
+
+2. **Why high-speed connections (300–400+ Mbps FTTH) need `download_mb = 25` to `50`:**
+   - In TCP/IP networking, throughput does not immediately peak within the first few milliseconds due to the **TCP Slow-Start** algorithm, which gradually scales the Congestion Window (CWND).
+   - If the test payload is too small (e.g. 2 MB or 5 MB), the entire download completes in less than 100 ms before the connection reaches its maximum steady-state rate. As a result, the measured speed might falsely appear as 60–80 Mbps instead of the actual 350+ Mbps.
+   - For 300+ Mbps lines, setting `download_mb = 25` to `50` and `speed_duration = 6` to `8` allows the TCP stream to saturate the link and accurately capture peak throughput.
+
+3. **Candidate Sample Size (`top_targets`):**
+   - Defaults to `10`: after completing the initial latency scan, the engine sorts all responsive endpoints by lowest ping and runs speed and stability diagnostics on the top 10 candidates to conserve time and bandwidth.
+   - Set to `0` or `all` if you want to perform speed tests on every single working IP discovered.
 
 ---
 
