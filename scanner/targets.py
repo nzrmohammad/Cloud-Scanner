@@ -65,25 +65,72 @@ def parse_ip_and_port(token: str) -> Tuple[str, Optional[int]]:
     return token, None
 
 
+def _resolve_target_file(raw_item: str, token: str) -> Optional[Path]:
+    """Look for an existing file directly, in app_dir, or matching in ip-ranges."""
+    p = Path(raw_item)
+    if p.is_file():
+        return p
+    alt = app_dir() / raw_item
+    if alt.is_file():
+        return alt
+    root = isp_root()
+    if root.exists():
+        for cand in (raw_item, f"{raw_item}.txt", token, f"{token}.txt"):
+            if cand:
+                matches = list(root.rglob(cand))
+                if matches and matches[0].is_file():
+                    return matches[0]
+        m = re.match(r"^(?:as|asn)?(\d{2,7})$", token, re.IGNORECASE)
+        if m:
+            num = m.group(1)
+            matches = [f for f in root.rglob(f"*{num}*.txt") if f.is_file() and "ipv6" not in f.name.lower()]
+            if not matches:
+                matches = [f for f in root.rglob(f"*{num}*.txt") if f.is_file()]
+            if matches:
+                return matches[0]
+    return None
+
+
+def _fetch_asn_prefixes(token: str) -> List[str]:
+    """Attempt to fetch announced prefixes for an ASN (e.g. AS42337) from RIPE stat API."""
+    m = re.match(r"^(?:as|asn)(\d{2,7})$", token, re.IGNORECASE)
+    if not m:
+        return []
+    asn_num = m.group(1)
+    try:
+        import json
+        import urllib.request
+        url = f"https://stat.ripe.net/data/announced-prefixes/data.json?resource=AS{asn_num}"
+        req = urllib.request.Request(url, headers={"User-Agent": "CloudScanner/1.0"})
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            data = json.loads(resp.read().decode("utf-8", errors="ignore"))
+            return [p["prefix"] for p in data.get("data", {}).get("prefixes", [])]
+    except Exception:
+        return []
+
+
 def _target_sources(items: Iterable[str]) -> List[TargetSource]:
     sources: List[TargetSource] = []
     for item in items:
         raw_item = str(item).strip().strip('"').strip("'")
         if not raw_item:
             continue
-        p = Path(raw_item)
-        if not p.is_absolute():
-            if not (p.exists() and p.is_file()):
-                alt_p = app_dir() / raw_item
-                if alt_p.exists() and alt_p.is_file():
-                    p = alt_p
-        if p.exists() and p.is_file():
-            lines = p.read_text(encoding="utf-8", errors="ignore").splitlines()
+        token = clean_target_token(raw_item)
+
+        matched_file = _resolve_target_file(raw_item, token)
+        if matched_file and matched_file.is_file():
+            lines = matched_file.read_text(encoding="utf-8", errors="ignore").splitlines()
             sources.extend(_target_sources(lines))
             continue
-        token = clean_target_token(raw_item)
+
         if not token:
             continue
+
+        asn_prefixes = _fetch_asn_prefixes(token)
+        if asn_prefixes:
+            sources.extend(_target_sources(asn_prefixes))
+            continue
+
         if "/" in token:
             net = ipaddress.ip_network(token, strict=False)
             start, end = _network_host_bounds(net)
