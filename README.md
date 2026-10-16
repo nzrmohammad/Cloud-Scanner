@@ -34,17 +34,17 @@
 - **🔬 Real Xray-core Inbound Testing**: Measures genuine TLS handshakes and latency through temporary in-memory Xray SOCKS5 instances without modifying system proxy settings.
 - **🌍 Physical IP Geo-Location (`IP Loc`)**: Automatically resolves and displays the genuine physical host location, city, and ASN of the clean/relay IP (e.g. `[IR] Tehran`, `[DE] Frankfurt`, `[US] Anycast`) using high-speed multi-threaded queries with thread-safe in-memory caching.
 - **🏢 Cloudflare Edge PoP (`Colo`) Resolution**: Concurrently queries Cloudflare trace via the proxy tunnel to detect the exact Cloudflare edge termination airport code (e.g. `[NL] AMS`, `[TR] IST`, `[DE] FRA`).
-- **🛡️ Anti-Drop / Longevity DPI Endurance Testing**: Evaluates connection endurance over sustained continuous traffic (15–20s) to detect and filter out endpoints dropped or throttled by ISP DPI firewalls.
+- **🛡️ Anti-Drop / Longevity DPI Endurance Testing**: Evaluates connection endurance over sustained continuous traffic (30s continuous flow) to detect and filter out endpoints dropped or throttled by ISP DPI firewalls.
 - **🌐 Full IPv4 & IPv6 Support**: Built-in support for official Cloudflare IPv6 clean ranges and subnets alongside classic IPv4 ranges.
-- **📊 Jitter & Packet-Loss Stability Analysis**: Performs multi-sample ping evaluations to identify ultra-stable connections.
-- **⚡ Real Speed Diagnostics**: Measures real **download** and **upload** throughput (`speed.cloudflare.com`) in Mbps.
+- **📊 Jitter & Packet-Loss Stability Analysis**: Performs multi-sample ping evaluations (RFC 3393 / RFC 3550) to identify ultra-stable connections.
+- **⚡ Real Speed Diagnostics**: Measures real **download** and **upload** throughput (`speed.cloudflare.com`) with warm-up TTFB isolation, adaptive payload sizing, and median-filtered multi-burst measurements.
 - **🧠 Smart Use-Case Recommendations**: Automatically classifies and exports optimal endpoints tailored for:
   - 🛡️ **Anti-Drop**: 100% sustained connections resistant to censorship throttling.
   - 🎮 **Gaming**: Minimal packet loss, consistent ping, and lowest jitter.
   - 📱 **Streaming / Instagram**: Maximum download/upload bandwidth for videos and stories.
   - 🌐 **General Browsing**: Fast HTTP handshakes and high reliability.
 - **🔄 Automated Core Downloader & Version Check**: Auto-detects official Xray binaries, checks for newer releases from GitHub, and reports core status on startup.
-- **🎨 Cross-Platform Terminal UI**: Built with [Rich](https://github.com/Textualize/rich), featuring keyboard navigation, interactive menus, and alignment-safe Unicode tables.
+- **🎨 Cross-Platform Terminal UI**: Built with [Rich](https://github.com/Textualize/rich), featuring alternate-screen buffer (`Live`), keyboard navigation, interactive menus, and alignment-safe Unicode tables.
 - **⚙️ 100% Config-Driven**: Set preferences once in `config.txt` and launch with zero interactive friction.
 - **🗂️ Ready-to-Use Outputs**: Produces CSV reports (with GeoIP & Colo), TXT lists, per-port splits, and ready-to-import `vless://` URLs with location-tagged remarks (e.g. `#Gaming_IR_AMS`).
 
@@ -96,19 +96,30 @@ Cloud_Scanner/
 │   ├── constants.py            # Ports, URLs, Cloudflare Colo database & defaults
 │   ├── models.py               # Strongly-typed Dataclasses & Custom Exceptions
 │   ├── geoip.py                # GeoIPResolver: Physical host location & ASN resolution
-│   ├── config.py               # ConfigManager: config.txt parser & in-place updater
+│   ├── config.py               # ConfigManager: config.txt parser & auto-migration
 │   ├── xray.py                 # XrayProcess (Context Manager) & version check
-│   ├── targets.py              # TargetResolver: CIDR/range expansion (IPv4 & IPv6)
+│   ├── targets.py              # CIDR/range expansion (IPv4 & IPv6)
 │   ├── engine.py               # ScannerEngine: TCP filter, latency, anti-drop, speed
-│   ├── analytics.py            # RecommendationEngine & multi-criteria sorting
+│   ├── analytics.py            # Result ranking & multi-criteria sorting
 │   ├── storage.py              # ResultExporter: CSV, TXT, per-port, VLESS links
+│   ├── logger.py               # File & console logging handler
 │   ├── app.py                  # CloudScannerApp: Master CLI/TUI orchestrator
 │   └── ui/                     # Terminal User Interface (TUI)
 │       ├── __init__.py
-│       ├── terminal.py         # Styling, banners, stages, prompts
+│       ├── terminal.py         # Styling, alternate screen buffer, headers, prompts
 │       ├── keys.py             # Cross-platform raw keyboard listener (Windows/POSIX)
-│       ├── menus.py            # Arrow-driven key menus & multi-selectors
+│       ├── menus.py            # Flicker-free arrow-driven menus & multi-selectors
 │       └── screens.py          # Startup check, summary tables, results
+│
+├── tests/                      # Automated pytest test suite (100% passing)
+│   ├── test_analytics.py
+│   ├── test_config.py
+│   ├── test_engine.py
+│   ├── test_geoip.py
+│   ├── test_menus.py
+│   ├── test_storage.py
+│   ├── test_targets.py
+│   └── test_xray.py
 │
 ├── scripts/                    # Automation utilities
 │   └── download_core.py        # Official cross-platform Xray-core downloader
@@ -118,6 +129,8 @@ Cloud_Scanner/
 │   ├── international/          # Hetzner, OVH, AWS, Fastly, etc.
 │   └── ipv6/                   # Cloudflare Official IPv6 CIDRs & clean subnets
 │
+├── .github/workflows/ci.yml    # GitHub Actions multi-platform CI pipeline
+├── pyproject.toml              # Project metadata, dev tools & test configuration
 ├── config.txt                  # User configuration file (untracked in git)
 ├── config.example.txt          # Clean template for git
 ├── requirements.txt            # Python dependencies (rich, requests)
@@ -135,6 +148,7 @@ Cloud_Scanner/
    ```bash
    pip install -r requirements.txt
    ```
+   *(For development and running tests: `pip install -e ".[dev]" && pytest tests/`)*
 3. **Xray Core**: Automatically fetch official binaries into `core/`:
    ```bash
    python scripts/download_core.py
@@ -174,16 +188,16 @@ You can edit `config.txt` to customize default behavior:
 | :--- | :--- | :--- |
 | `vless` | *(empty)* | Your complete `vless://...` configuration link. |
 | `ports` | `443, 8443, 2053, 2083, 2087, 2096` | Ports to scan, or `config` to scan only the port in the link. |
-| `workers` | `66` | Concurrency workers for scanning. |
+| `workers` | `25` | Concurrency workers for scanning (optimized for socket stability). |
 | `timeout` | `2` | Connection timeout in seconds. |
 | `tcp_prefilter` | `true` | Ultra-fast TCP pre-filter handshake before Xray tests. |
 | `max_targets` | `0` | Maximum target IPs to load (`0` = unlimited). |
 | `post_scan_mode` | `full` | Post-scan quality testing: `full`, `stability`, `longevity`, `speed`, or `none`. |
-| `top_targets` | `10` | Number of best-performing endpoints to test for speed/jitter (`0` or `all` = test ALL working IPs). |
-| `ping_samples` | `5` | Pings per endpoint for stability (packet loss & jitter). |
-| `longevity_test` | `true` | Anti-Drop endurance test (sustained traffic against DPI drops). |
-| `longevity_duration` | `15` | Anti-Drop test duration in seconds. |
-| `download_mb` | `5` | Download speed test size in megabytes. |
+| `top_targets` | `30` | Number of best-performing endpoints to test for speed/jitter (`0` or `all` = test ALL working IPs). |
+| `ping_samples` | `8` | Pings per endpoint for stability (packet loss & RFC jitter). |
+| `longevity_test` | `true` | Anti-Drop endurance test (sustained continuous streaming against DPI drops). |
+| `longevity_duration` | `30` | Anti-Drop test duration in seconds (continuous stream). |
+| `download_mb` | `5` | Download speed test size in megabytes (adaptively scaled based on warmup). |
 | `upload_mb` | `1` | Upload speed test size in megabytes (`0` to skip). |
 | `speed_duration` | `5` | Speed test timeout per IP in seconds. |
 | `speed_workers` | `5` | Concurrency workers for speed testing. |
@@ -215,7 +229,7 @@ Fine-tuning speed test parameters in `config.txt` depends directly on your conne
    - For 300+ Mbps lines, setting `download_mb = 25` to `50` and `speed_duration = 6` to `8` allows the TCP stream to saturate the link and accurately capture peak throughput.
 
 3. **Candidate Sample Size (`top_targets`):**
-   - Defaults to `10`: after completing the initial latency scan, the engine sorts all responsive endpoints by lowest ping and runs speed and stability diagnostics on the top 10 candidates to conserve time and bandwidth.
+   - Defaults to `30`: after completing the initial latency scan, the engine sorts all responsive endpoints by lowest ping and runs speed and stability diagnostics on the top 30 candidates to conserve time and bandwidth.
    - Set to `0` or `all` if you want to perform speed tests on every single working IP discovered.
 
 ---

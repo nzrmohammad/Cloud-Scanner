@@ -8,10 +8,13 @@ import subprocess
 import tempfile
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from scanner.constants import app_dir
+from scanner.logger import get_logger
 from scanner.models import VlessConfig
+
+logger = get_logger("xray")
 
 try:
     import requests
@@ -94,88 +97,34 @@ def get_xray_version(xray_path: Optional[Path]) -> Optional[str]:
         match = re.search(r"Xray\s+([\d\.]+)", proc.stdout)
         if match:
             return match.group(1).strip()
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.debug("Failed to get xray version: %s", exc)
     return None
 
 
-def check_latest_xray_version(timeout: float = 1.8) -> Optional[str]:
-    """Check the latest release tag of Xray-core from GitHub releases."""
-    if requests is None:
-        return None
-    try:
-        r = requests.head(
-            "https://github.com/XTLS/Xray-core/releases/latest",
-            allow_redirects=False,
-            timeout=timeout,
-            headers={"User-Agent": "CloudScanner"},
-        )
-        loc = r.headers.get("Location") or ""
-        if "/tag/" in loc:
-            tag = loc.rsplit("/tag/", 1)[-1].strip()
-            return tag.lstrip("v")
-    except Exception:
-        pass
-    return None
+def get_environment_status(xray_path: Optional[Path]) -> Dict[str, Any]:
+    """Inspect environment files and dependencies headlessly."""
+    geoip_file = find_asset("geoip.dat", xray_path)
+    geosite_file = find_asset("geosite.dat", xray_path)
+    local_ver = get_xray_version(xray_path) if xray_path else None
+    has_xray = bool(xray_path and xray_path.exists())
+    has_requests = requests is not None
+
+    return {
+        "xray_path": xray_path,
+        "xray_ok": has_xray,
+        "xray_version": local_ver,
+        "geoip_ok": bool(geoip_file),
+        "geosite_ok": bool(geosite_file),
+        "requests_ok": has_requests,
+        "ok": bool(has_xray and has_requests),
+    }
 
 
 def check_environment(xray_path: Optional[Path], show_help: bool = True) -> bool:
-    """Check availability of required binary and data files."""
-    ok = True
-    rows = []
-    geoip_file = find_asset("geoip.dat", xray_path)
-    geosite_file = find_asset("geosite.dat", xray_path)
-
-    # Determine Xray version and update status
-    xray_status = "[red]MISSING[/red]"
-    update_notice = ""
-    if xray_path:
-        local_ver = get_xray_version(xray_path)
-        latest_ver = check_latest_xray_version()
-        if local_ver and latest_ver:
-            if local_ver == latest_ver:
-                xray_status = f"[green]FOUND (v{local_ver}) [Latest][/green]"
-            else:
-                xray_status = f"[yellow]FOUND (v{local_ver}) -> Update: v{latest_ver}[/yellow]"
-                update_notice = f"New Xray v{latest_ver} available! Run: python scripts/download_core.py"
-        elif local_ver:
-            xray_status = f"[green]FOUND (v{local_ver})[/green]"
-        else:
-            xray_status = "[green]FOUND[/green]"
-    else:
-        ok = False
-
-    rows.append(("xray.exe / xray", xray_status))
-    rows.append(("geoip.dat", "[green]FOUND[/green]" if geoip_file else "[red]MISSING[/red]"))
-    rows.append(("geosite.dat", "[green]FOUND[/green]" if geosite_file else "[red]MISSING[/red]"))
-    rows.append(("requests[socks]", "[green]FOUND[/green]" if requests is not None else "[red]MISSING[/red]"))
-
-    if requests is None:
-        ok = False
-
-    try:
-        from rich import box
-        from rich.console import Console
-        from rich.table import Table
-
-        console = Console()
-        table = Table(title="Startup Check", box=box.ROUNDED, border_style="cyan")
-        table.add_column("Component", style="white")
-        table.add_column("Status")
-        for name, status in rows:
-            table.add_row(name, status)
-        console.print(table)
-        if update_notice:
-            console.print(f"[dim yellow][*] {update_notice}[/dim yellow]")
-    except ImportError:
-        for name, status in rows:
-            print(f"{name}: {status}")
-        if update_notice:
-            print(f"Notice: {update_notice}")
-
-    if not ok and show_help:
-        print("\nPlace xray.exe/xray in core/ and install dependencies with: pip install -r requirements.txt")
-    return ok
+    """Check availability of required binary and data files headlessly."""
+    status = get_environment_status(xray_path)
+    return status["ok"]
 
 
 def vless_to_xray_outbound(v: VlessConfig, server_ip: str, port: Optional[int] = None) -> Dict[str, Any]:
@@ -212,7 +161,7 @@ def vless_to_xray_outbound(v: VlessConfig, server_ip: str, port: Optional[int] =
         outbound["streamSettings"][tls_key] = {
             "serverName": sni,
             "fingerprint": fp,
-            "allowInsecure": q.get("allowInsecure", "0") in {"1", "true"},
+            "allowInsecure": (q.get("allowInsecure") or q.get("insecure", "0")) in {"1", "true"},
         }
         if alpn:
             outbound["streamSettings"][tls_key]["alpn"] = [x.strip() for x in alpn.split(",") if x.strip()]
@@ -270,6 +219,48 @@ def make_xray_config(
             {"tag": "direct", "protocol": "freedom"},
             {"tag": "block", "protocol": "blackhole"},
         ],
+    }
+
+
+def make_batch_xray_config(
+    v: VlessConfig,
+    endpoint_ports: List[Tuple[str, int, int]],  # (ip, port, socks_port)
+    loglevel: str = "warning",
+) -> Dict[str, Any]:
+    """Generate multi-inbound, multi-outbound Xray configuration for batch testing."""
+    inbounds = []
+    outbounds = []
+    rules = []
+    for idx, (ip, p, socks_p) in enumerate(endpoint_ports):
+        tag_in = f"socks-{idx}"
+        tag_out = f"proxy-{idx}"
+        inbounds.append({
+            "tag": tag_in,
+            "listen": "127.0.0.1",
+            "port": socks_p,
+            "protocol": "socks",
+            "settings": {"udp": False},
+        })
+        outbound = vless_to_xray_outbound(v, ip, port=p)
+        outbound["tag"] = tag_out
+        outbounds.append(outbound)
+        rules.append({
+            "type": "field",
+            "inboundTag": [tag_in],
+            "outboundTag": tag_out,
+        })
+
+    outbounds.append({"tag": "direct", "protocol": "freedom"})
+    outbounds.append({"tag": "block", "protocol": "blackhole"})
+
+    return {
+        "log": {"loglevel": loglevel},
+        "inbounds": inbounds,
+        "outbounds": outbounds,
+        "routing": {
+            "domainStrategy": "AsIs",
+            "rules": rules,
+        },
     }
 
 
@@ -334,21 +325,21 @@ class XrayProcess:
             try:
                 self.proc.terminate()
                 self.proc.wait(timeout=1.0)
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug("Clean termination failed, forcing kill: %s", exc)
             try:
                 if self.proc.poll() is None:
                     self.proc.kill()
                     self.proc.wait(timeout=0.5)
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug("Subprocess kill failed: %s", exc)
             self.proc = None
 
         if self.temp_dir is not None:
             try:
                 self.temp_dir.cleanup()
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug("Temp directory cleanup failed: %s", exc)
             self.temp_dir = None
 
     @property
@@ -358,3 +349,86 @@ class XrayProcess:
     @property
     def proxies(self) -> Dict[str, str]:
         return {"http": self.socks_url, "https": self.socks_url}
+
+
+class BatchXrayProcess:
+    """Context manager running a single Xray process routing multiple endpoints via separate local SOCKS ports."""
+
+    def __init__(
+        self,
+        xray_path: Path,
+        vless_config: VlessConfig,
+        endpoints: List[Tuple[str, int]],  # List of (ip, port)
+        loglevel: str = "warning",
+        ready_timeout: float = 4.0,
+    ):
+        self.xray_path = xray_path
+        self.vless_config = vless_config
+        self.endpoints = endpoints
+        self.loglevel = loglevel
+        self.ready_timeout = ready_timeout
+        self.endpoint_ports = [(ip, p, free_port()) for ip, p in endpoints]
+        self.temp_dir: Optional[tempfile.TemporaryDirectory] = None
+        self.proc: Optional[subprocess.Popen] = None
+
+    def __enter__(self) -> "BatchXrayProcess":
+        try:
+            self.temp_dir = tempfile.TemporaryDirectory(prefix="rkh_cfs_batch_", ignore_cleanup_errors=True)
+        except TypeError:
+            self.temp_dir = tempfile.TemporaryDirectory(prefix="rkh_cfs_batch_")
+        cfg_path = Path(self.temp_dir.name) / "config.json"
+        config_dict = make_batch_xray_config(
+            self.vless_config,
+            self.endpoint_ports,
+            self.loglevel,
+        )
+        cfg_path.write_text(json.dumps(config_dict, indent=2), encoding="utf-8")
+
+        xray_dir = self.xray_path.parent
+        env = os.environ.copy()
+        env["XRAY_LOCATION_ASSET"] = str(xray_dir)
+        self.proc = subprocess.Popen(
+            [str(self.xray_path), "run", "-config", str(cfg_path)],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            cwd=str(xray_dir),
+            env=env,
+        )
+        if self.endpoint_ports:
+            if not wait_port(self.endpoint_ports[0][2], self.ready_timeout):
+                self.close()
+                raise TimeoutError("Batch Xray did not open SOCKS port within timeout")
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.close()
+
+    def close(self) -> None:
+        if self.proc is not None:
+            try:
+                self.proc.terminate()
+                self.proc.wait(timeout=1.0)
+            except Exception as exc:
+                logger.debug("Batch Xray clean termination failed: %s", exc)
+            try:
+                if self.proc.poll() is None:
+                    self.proc.kill()
+                    self.proc.wait(timeout=0.5)
+            except Exception as exc:
+                logger.debug("Batch Xray force kill failed: %s", exc)
+            self.proc = None
+
+        if self.temp_dir is not None:
+            try:
+                self.temp_dir.cleanup()
+            except Exception as exc:
+                logger.debug("Batch temp directory cleanup failed: %s", exc)
+            self.temp_dir = None
+
+    def get_proxies_for_endpoint(self, ip: str, port: int) -> Optional[Dict[str, str]]:
+        for ep_ip, ep_port, socks_port in self.endpoint_ports:
+            if ep_ip == ip and ep_port == port:
+                url = f"socks5h://127.0.0.1:{socks_port}"
+                return {"http": url, "https": url}
+        return None
+

@@ -7,7 +7,10 @@ from scanner.analytics import apply_result_filters, output_sort_key
 from scanner.config import make_vless_link
 from scanner.constants import format_cf_colo
 from scanner.geoip import format_ip_location
+from scanner.logger import get_logger
 from scanner.models import ScanResult, SmartRecommendation, VlessConfig
+
+logger = get_logger("storage")
 
 
 def save_results(
@@ -70,7 +73,7 @@ def save_results(
                 )
             elif is_speed:
                 lines.append(
-                    f"{r.ip}:{r.port} | down: {down} | up: {up} | downloaded: {r.speed_bytes} bytes | uploaded: {r.upload_bytes} bytes{loc_str}{colo_str}{extra}"
+                    f"{r.ip}:{r.port} | down: {down} | up: {up} | downloaded: {r.download_bytes} bytes | uploaded: {r.upload_bytes} bytes{loc_str}{colo_str}{extra}"
                 )
             elif is_longevity:
                 drop_status = "SUSTAINED" if r.sustained else f"DROPPED({r.longevity_loss:.0f}%)"
@@ -97,6 +100,7 @@ def save_results(
                 "ip_location",
                 "download_mbps",
                 "upload_mbps",
+                "ttfb_ms",
                 "avg_latency_ms",
                 "jitter_ms",
                 "packet_loss_pct",
@@ -121,6 +125,7 @@ def save_results(
                     format_ip_location(r.ip_country, r.ip_city) if r.ip_country else "",
                     f"{r.speed_mbps:.2f}" if r.speed_mbps is not None else "",
                     f"{r.upload_mbps:.2f}" if r.upload_mbps is not None else "",
+                    f"{r.ttfb_ms:.1f}" if r.ttfb_ms is not None else "",
                     f"{r.latency_ms:.1f}" if r.latency_ms is not None else "",
                     f"{r.jitter_ms:.1f}" if r.jitter_ms is not None else "",
                     f"{r.packet_loss:.0f}",
@@ -128,7 +133,7 @@ def save_results(
                     f"{r.longevity_loss:.0f}" if r.longevity_loss is not None else "",
                     r.colo or "",
                     format_cf_colo(r.colo) if r.colo else "",
-                    r.speed_bytes or "",
+                    r.download_bytes or "",
                     r.upload_bytes or "",
                     r.recheck_passed or "",
                     r.recheck_total or "",
@@ -177,6 +182,7 @@ def save_results(
                 "ip_location",
                 "download_mbps",
                 "upload_mbps",
+                "ttfb_ms",
                 "colo_code",
                 "colo_location",
                 "speed_bytes",
@@ -195,9 +201,10 @@ def save_results(
                     format_ip_location(r.ip_country, r.ip_city) if r.ip_country else "",
                     f"{r.speed_mbps:.2f}" if r.speed_mbps is not None else "",
                     f"{r.upload_mbps:.2f}" if r.upload_mbps is not None else "",
+                    f"{r.ttfb_ms:.1f}" if r.ttfb_ms is not None else "",
                     r.colo or "",
                     format_cf_colo(r.colo) if r.colo else "",
-                    r.speed_bytes or "",
+                    r.download_bytes or "",
                     r.upload_bytes or "",
                     r.speed_error or "",
                     r.upload_error or "",
@@ -315,7 +322,7 @@ def save_results(
                     )
                 elif is_speed:
                     port_lines.append(
-                        f"{r.ip} | down: {down} | up: {up} | downloaded: {r.speed_bytes} bytes | uploaded: {r.upload_bytes} bytes{port_colo_str}"
+                        f"{r.ip} | down: {down} | up: {up} | downloaded: {r.download_bytes} bytes | uploaded: {r.upload_bytes} bytes{port_colo_str}"
                     )
                 elif is_recheck:
                     port_lines.append(
@@ -371,7 +378,8 @@ def save_recommended_configs(
                 lines.append("")
         rec_path.write_text("\n".join(lines), encoding="utf-8")
         return rec_path
-    except Exception:
+    except Exception as exc:
+        logger.error("Failed to save recommendations to %s: %s", rec_path if 'rec_path' in locals() else output_dir, exc, exc_info=True)
         return None
 
 

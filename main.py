@@ -20,10 +20,12 @@ if sys.platform == "win32":
         pass
 
 from scanner.app import CloudScannerApp
+from scanner.logger import setup_logging
 
 
 def main() -> int:
     """Entry point for Cloud Scanner CLI and interactive TUI."""
+    setup_logging()
     app = CloudScannerApp()
     return app.run()
 

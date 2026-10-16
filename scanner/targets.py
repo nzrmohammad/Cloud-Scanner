@@ -5,7 +5,10 @@ from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Tuple
 
 from scanner.constants import MAX_DEFAULT_HOSTS, app_dir, isp_root
+from scanner.logger import get_logger
 from scanner.models import TargetSource
+
+logger = get_logger("targets")
 
 
 def clean_target_token(item: str) -> str:
@@ -105,7 +108,8 @@ def _fetch_asn_prefixes(token: str) -> List[str]:
         with urllib.request.urlopen(req, timeout=5) as resp:
             data = json.loads(resp.read().decode("utf-8", errors="ignore"))
             return [p["prefix"] for p in data.get("data", {}).get("prefixes", [])]
-    except Exception:
+    except Exception as exc:
+        logger.warning("Failed to fetch announced prefixes for ASN%s from RIPE NCC: %s", asn_num, exc)
         return []
 
 
@@ -315,19 +319,3 @@ def print_isp_catalog_cli() -> None:
         for path in files:
             count, preview = read_isp_stats(path)
             cprint(f"  - {isp_display_name(path)} ({count} lines) {preview}")
-
-
-class TargetResolver:
-    """Class wrapper for IP range and ISP catalog resolution."""
-
-    @staticmethod
-    def expand(items: Iterable[str], max_hosts: Optional[int] = 0, sample: bool = True) -> List[str]:
-        return expand_targets(items, max_hosts=max_hosts, sample_if_too_many=sample)
-
-    @staticmethod
-    def get_isps(category: str) -> List[Path]:
-        return list_isp_files(category)
-
-    @staticmethod
-    def resolve_isps(category: str, names: Optional[List[str]]) -> List[Path]:
-        return resolve_isp_files(category, names)

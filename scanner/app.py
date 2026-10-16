@@ -17,14 +17,13 @@ from scanner.constants import (
     app_dir,
 )
 from scanner.engine import (
-    execute_configured_post_scan_tests,
-    run_latency_recheck,
-    run_longevity_tests,
+    run_longevity_stage,
     run_scan,
-    run_speed_tests,
+    run_speed_stage,
+    run_stability_stage,
 )
+from scanner.logger import get_logger
 from scanner.models import (
-    AppSettings,
     NavigationBack,
     NavigationExit,
     ScanInterrupted,
@@ -35,13 +34,17 @@ from scanner.storage import save_results
 from scanner.targets import expand_targets, print_isp_catalog_cli, resolve_isp_files
 from scanner.ui import (
     cprint,
+    handle_post_scan_testing_tui,
     pause,
     post_scan_actions_menu,
+    progress_reporter,
+    prompt_continue_nav,
     prompt_str,
     render_stage,
     render_welcome_config_screen,
     select_targets_tui,
     show_final_results,
+    tui_screen,
 )
 from scanner.xray import find_xray
 
@@ -49,6 +52,8 @@ try:
     import requests
 except ImportError:
     requests = None
+
+logger = get_logger("app")
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -66,7 +71,6 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--max-hosts", type=int, default=MAX_DEFAULT_HOSTS, help="Maximum targets to load. 0/default = unlimited; positive numbers cap and sample large ISP ranges.")
     p.add_argument("--url", default=DEFAULT_URL)
     p.add_argument("--loglevel", choices=["debug", "info", "warning", "error", "none"], default="warning")
-    p.add_argument("--keep-configs", action="store_true")
     p.add_argument("--recheck", action="store_true", help="After the first scan, re-test working IPs and save updated results")
     p.add_argument("--recheck-samples", type=int, default=5, help="Latency tests per working IP during --recheck")
     p.add_argument("--recheck-workers", type=int, default=None, help="Workers for --recheck. Default: same as --concurrency")
@@ -96,22 +100,48 @@ class CloudScannerApp:
         self.argv = argv if argv is not None else sys.argv[1:]
         self.parser = build_arg_parser()
         self.config_manager = ConfigManager()
+        self.last_results: List[ScanResult] = []
+        self.last_txt: Optional[Path] = None
+        self.last_csv: Optional[Path] = None
+        self.last_prefix: str = "clean_ips"
+        self.last_vless: Optional[VlessConfig] = None
 
     def interactive(self) -> int:
-        """Run interactive TUI mode."""
+        """Run interactive TUI mode within an alternate screen buffer."""
         xray = find_xray()
         if not xray:
             cprint("xray.exe/xray not found. Place it beside the script or pass --xray.", "red")
             pause("Press Enter to exit...")
             return 1
 
+        with tui_screen():
+            ret = self._run_interactive_tui(xray)
+
+        if self.last_results:
+            cprint("\n[bold green]Cloud Scanner finished.[/bold green] Summary of top clean endpoints:")
+            show_final_results(
+                self.last_results,
+                self.last_txt or (app_dir() / "results" / "clean_ips.txt"),
+                self.last_csv or (app_dir() / "results" / "clean_ips.csv"),
+                filename_prefix=self.last_prefix or "clean_ips",
+                vless_config=self.last_vless,
+            )
+        else:
+            clean_file = app_dir() / "results" / "clean_ips.txt"
+            if clean_file.exists():
+                cprint(f"\n[bold green]Cloud Scanner finished.[/bold green] Output saved to: [cyan]{clean_file}[/cyan]")
+        return ret
+
+    def _run_interactive_tui(self, xray: Path) -> int:
         while True:
             settings = self.config_manager.load_settings()
             v: Optional[VlessConfig] = None
             if settings.vless_raw:
                 try:
                     v = parse_vless(settings.vless_raw)
-                except Exception:
+                except Exception as exc:
+                    logger.warning("Saved configuration in config.txt was invalid: %s", exc)
+                    cprint("\n[yellow]Saved configuration was invalid, please enter a new one.[/yellow]")
                     v = None
 
             if v is None:
@@ -155,8 +185,9 @@ class CloudScannerApp:
                                 save_vless_config(content)
                                 settings = self.config_manager.load_settings()
                                 break
-                        except Exception:
-                            pass
+                        except Exception as e:
+                            error = f"Could not read config file: {e}"
+                            continue
                         error = "Invalid VLESS URI. Press Enter to use saved config, or type q to exit."
 
             while True:
@@ -173,11 +204,19 @@ class CloudScannerApp:
                 action = None
                 while True:
                     total_endpoints = len(targets) * len(ports)
+                    est_time = max(3, int(total_endpoints / max(1, settings.workers * 2)))
+
                     render_stage(
-                        "Scanning",
-                        f"Source: {target_label} | IPs: {len(targets)} | Ports: {len(ports)} | Total: {total_endpoints} | Workers: {settings.workers}",
+                        "Scan Plan & Dry-Run",
+                        f"Source: {target_label} | IPs: {len(targets)} | Ports: {len(ports)} | Total Endpoints: {total_endpoints} | Workers: {settings.workers}\n"
+                        f"Estimated duration: ~{est_time}s (with TCP prefilter).",
                         "cyan",
                     )
+                    try:
+                        prompt_continue_nav("Press Enter to begin scan", allow_back=True)
+                    except NavigationBack:
+                        break
+
                     try:
                         results = run_scan(
                             v,
@@ -189,9 +228,11 @@ class CloudScannerApp:
                             1,
                             settings.test_url,
                             "warning",
-                            False,
                             use_tcp_prefilter=settings.tcp_prefilter,
                             output_dir=output_dir,
+                            on_stage=render_stage,
+                            on_message=cprint,
+                            make_reporter=progress_reporter,
                         )
                         txt, csvp = save_results(results, output_dir, "clean_ips", vless_config=v)
                         render_stage("Scan Results", "Latency scan finished. Results are saved below.", "green")
@@ -210,12 +251,24 @@ class CloudScannerApp:
                     prefix = "clean_ips"
                     final_txt, final_csv = txt, csvp
 
-                    if working_results and settings.post_scan_mode != "none":
-                        final_results, final_txt, final_csv, prefix = execute_configured_post_scan_tests(
-                            settings, v, working_results, xray, output_dir
+                    if working_results:
+                        final_results, final_txt, final_csv, prefix = handle_post_scan_testing_tui(
+                            v,
+                            working_results,
+                            xray,
+                            settings.workers,
+                            settings.timeout,
+                            settings.test_url,
+                            output_dir,
                         )
                         render_stage("Final Results", "Testing complete. Summary of best results below.", "green")
                         show_final_results(final_results, final_txt, final_csv, filename_prefix=prefix, vless_config=v)
+
+                    self.last_results = final_results
+                    self.last_txt = final_txt
+                    self.last_csv = final_csv
+                    self.last_prefix = prefix
+                    self.last_vless = v
 
                     pause("\n> Press Enter to view action options (Scan Again / Retest / Exit)...")
                     action = post_scan_actions_menu(v, final_results, prefix)
@@ -228,6 +281,7 @@ class CloudScannerApp:
                         return 0
 
                 if action == "rescan_all":
+
                     break
 
     def run_cli(self, args: argparse.Namespace) -> int:
@@ -288,9 +342,11 @@ class CloudScannerApp:
                 args.tries,
                 args.url,
                 args.loglevel,
-                args.keep_configs,
                 use_tcp_prefilter=use_tcp_prefilter,
                 output_dir=Path(args.output_dir),
+                on_stage=render_stage,
+                on_message=cprint,
+                make_reporter=progress_reporter,
             )
             txt, csvp = save_results(results, Path(args.output_dir), "clean_ips", vless_config=v)
         except ScanInterrupted as interrupted:
@@ -303,9 +359,9 @@ class CloudScannerApp:
         show_final_results(results, txt, csvp, vless_config=v)
         final_results = [r for r in results if r.ok]
 
-        if args.recheck:
+        if args.recheck and final_results:
             try:
-                final_results = run_latency_recheck(
+                final_results = run_stability_stage(
                     v,
                     final_results,
                     xray,
@@ -314,6 +370,8 @@ class CloudScannerApp:
                     args.recheck_samples,
                     args.url,
                     args.loglevel,
+                    on_stage=render_stage,
+                    make_reporter=progress_reporter,
                 )
                 txt, csvp = save_results(final_results, Path(args.output_dir), "clean_ips_rechecked", vless_config=v)
             except ScanInterrupted as interrupted:
@@ -324,17 +382,18 @@ class CloudScannerApp:
                 return 130
             show_final_results(final_results, txt, csvp, filename_prefix="clean_ips_rechecked", vless_config=v)
 
-        if args.longevity_test:
+        if args.longevity_test and final_results:
             try:
-                final_results = run_longevity_tests(
+                final_results = run_longevity_stage(
                     v,
                     final_results,
                     xray,
-                    workers=args.speed_workers,
-                    duration=args.longevity_duration,
-                    timeout=args.timeout,
-                    url=args.url,
-                    loglevel=args.loglevel,
+                    args.speed_workers,
+                    args.longevity_duration,
+                    args.timeout,
+                    args.loglevel,
+                    on_stage=render_stage,
+                    make_reporter=progress_reporter,
                 )
                 txt, csvp = save_results(final_results, Path(args.output_dir), "clean_ips_longevity", vless_config=v)
             except ScanInterrupted as interrupted:
@@ -345,21 +404,22 @@ class CloudScannerApp:
                 return 130
             show_final_results(final_results, txt, csvp, filename_prefix="clean_ips_longevity", vless_config=v)
 
-        if args.speed_test:
+        if args.speed_test and final_results:
             try:
-                test_upload = not args.skip_upload_test and args.speed_upload_mb > 0
-                final_results = run_speed_tests(
+                upload_mb = 0 if args.skip_upload_test else args.speed_upload_mb
+                final_results = run_speed_stage(
                     v,
                     final_results,
                     xray,
                     args.speed_workers,
-                    args.speed_timeout,
-                    args.speed_mb * 1024 * 1024,
                     args.speed_duration,
-                    args.speed_url,
-                    args.loglevel,
-                    test_upload=test_upload,
-                    upload_bytes=args.speed_upload_mb * 1024 * 1024,
+                    args.speed_timeout,
+                    args.speed_mb,
+                    upload_mb=upload_mb,
+                    speed_url=args.speed_url,
+                    loglevel=args.loglevel,
+                    on_stage=render_stage,
+                    make_reporter=progress_reporter,
                 )
                 txt, csvp = save_results(final_results, Path(args.output_dir), "clean_ips_speed_tested", include_speed_errors=True, vless_config=v)
             except ScanInterrupted as interrupted:

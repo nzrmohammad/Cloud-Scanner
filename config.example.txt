@@ -1,66 +1,61 @@
 # ==============================================================
-# Cloud Scanner Settings (تنظیمات اسکنر کلودفلر)
+# Cloud Scanner Settings
 # ==============================================================
 
-# VLESS Config Link (لینک کانفیگ VLESS شما)
+# VLESS Config Link
 vless = vless://your-uuid-here@your-domain.com:443?encryption=none&security=tls&sni=your-sni.com&fp=chrome&alpn=http%2F1.1&insecure=0&type=ws&host=your-sni.com&path=%2F#MyConfig
 
-# Target Ports to scan (پورت‌های مورد نظر برای اسکن - جدا شده با کاما)
-# برای اسکن ۶ پورت اصلی کلودفلر: 443, 8443, 2053, 2083, 2087, 2096
-# برای اسکن فقط پورت داخل کانفیگ: config
+# Target Ports to scan (comma-separated)
+# For all 6 Cloudflare TLS ports: 443, 8443, 2053, 2083, 2087, 2096
+# To scan only the port defined in the VLESS link: config
 ports = 443, 8443, 2053, 2083, 2087, 2096
 
-# Scan Speed / Workers (سرعت اسکن / تعداد ورکرها)
-workers = 66
+# Scan Concurrency / Workers
+workers = 25
 
-# Timeout in seconds (مهلت اتصال به ثانیه)
+# Timeout in seconds
 timeout = 2
 
-# Fast TCP Pre-filter (پیش‌فیلتر فوق سریع TCP)
+# Fast TCP Pre-filter (true/false)
 tcp_prefilter = true
 
-# Latency Test URL (آدرس تست پینگ و اتصال)
+# Latency Test URL
 test_url = https://www.gstatic.com/generate_204
 
-# Maximum target IPs to load/scan (حداکثر تعداد آی‌پی برای اسکن)
-# عدد 0 یا unlimited یعنی تمام آی‌پی‌ها بدون محدودیت اسکن شوند؛ یا یک عدد دلخواه (مثلاً 500 یا 1000)
+# Maximum target IPs to load/scan (0 or unlimited = scan all targets)
 max_targets = 0
 
 # ==============================================================
-# Quality & Speed Testing Settings (تنظیمات تست کیفیت و سرعت)
+# Quality, Anti-Drop & Speed Testing Settings
 # ==============================================================
-# Post-scan test mode: full | stability | speed | none
-# full: Stability (Loss% + Jitter) + Download & Upload Speed
+# Post-scan test mode: full | stability | longevity | speed | none
+# full: Stability + Anti-Drop (DPI Endurance) + Download & Upload Speed
 # stability: Stability (Loss% + Jitter) only
+# longevity: Anti-Drop Endurance test only
 # speed: Download & Upload Speed only
 # none: Skip post-scan testing
 post_scan_mode = full
 
-# Top targets count to test for quality & speed (تعداد برترین اهداف جهت تست سرعت و پایداری)
-# عدد 0 یا all یعنی تمام آی‌پی‌های سالم پیدا شده تست شوند؛ یا یک عدد (مثلاً 10 یا 20) برای گلچین برترین‌ها بر اساس کمترین پینگ
-top_targets = 10
+# Top target count to test for quality & speed (0 = test all clean IPs)
+top_targets = 30
 
-# Ping samples for stability & jitter test (تعداد پینگ تست پایداری و جیتر)
-ping_samples = 5
+# Ping samples for stability & RFC jitter calculation
+ping_samples = 8
 
-# Anti-Drop / Longevity endurance test (تست مقاومت در برابر قطع شدن توسط فیلترینگ DPI)
-# بررسی زنده ماندن اتصال در طول زمان و عدم ارسال پکت‌های قطع اتصال (TCP RST)
+# Anti-Drop / Longevity endurance test (true/false)
 longevity_test = true
 
-# Longevity test duration in seconds (مدت زمان تست پایداری مداوم به ثانیه)
-longevity_duration = 15
+# Longevity test duration in seconds (continuous stream against DPI drop)
+longevity_duration = 30
 
-# Download test size in MB (حجم فایل دانلود تستی بر حسب مگابایت)
-# برای ADSL 16Mbps مقدار 2 یا 3 | برای 4G مقدار 5 یا 10 | برای فیبرنوری 300+ مگابیت مقدار 25 یا 50
+# Download test size in MB (e.g. 2-3 for ADSL, 5-10 for 4G/LTE, 25-50 for high-speed fiber)
 download_mb = 5
 
-# Upload test size in MB (حجم فایل آپلود تستی بر حسب مگابایت - عدد 0 یعنی غیرفعال)
-# برای ADSL بهتر است 0 باشد؛ برای اینترنت‌های پرسرعت 1 الی 5 مگابایت
+# Upload test size in MB (0 = disable upload testing)
 upload_mb = 1
 
-# Max test duration per IP in seconds (محدودیت زمان تست سرعت)
+# Max speed test duration per IP in seconds
 speed_duration = 5
 
-# Speed test concurrency workers (تعداد ورکر همزمان برای تست سرعت)
+# Speed test concurrency workers
 speed_workers = 5
-

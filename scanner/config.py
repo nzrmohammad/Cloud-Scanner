@@ -1,13 +1,15 @@
 from pathlib import Path
-from typing import Optional
-from urllib.parse import parse_qs, unquote, urlencode, urlparse, quote
+from urllib.parse import parse_qs, quote, unquote, urlencode, urlparse
 
 from scanner.constants import (
     DEFAULT_CONFIG_FILENAME,
     DEFAULT_CONFIG_TEMPLATE,
     app_dir,
 )
+from scanner.logger import get_logger
 from scanner.models import AppSettings, VlessConfig
+
+logger = get_logger("config")
 
 
 def parse_vless(uri_or_file: str) -> VlessConfig:
@@ -52,8 +54,8 @@ class ConfigManager:
         """Create a default configuration file."""
         try:
             self.config_path.write_text(DEFAULT_CONFIG_TEMPLATE.format(vless=vless.strip()), encoding="utf-8")
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning("Failed to write default config to %s: %s", self.config_path, exc)
 
     def load_settings(self) -> AppSettings:
         """Load and parse application settings from config.txt."""
@@ -146,8 +148,9 @@ class ConfigManager:
                             settings.speed_workers = max(1, int(val))
                 elif line.startswith("vless://") and not settings.vless_raw:
                     settings.vless_raw = line
-        except Exception:
-            pass
+
+        except Exception as exc:
+            logger.warning("Failed to load settings from config %s: %s", self.config_path, exc)
 
         return settings
 
@@ -174,8 +177,8 @@ class ConfigManager:
                 self.config_path.write_text("\n".join(new_lines) + "\n", encoding="utf-8")
                 return
             self.generate_default_config(vless=raw_vless.strip())
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning("Failed to save vless config to %s: %s", self.config_path, exc)
 
 
 # Global module-level convenience functions

@@ -1,27 +1,17 @@
 import re
-from datetime import datetime
 from pathlib import Path
 from typing import Any, List, Optional, Tuple
 
 from scanner.analytics import (
     apply_result_filters,
-    full_sort_key,
     get_smart_recommendations,
-    latency_sort_key,
     output_sort_key,
 )
 from scanner.config import load_saved_vless_config, parse_vless, save_vless_config
 from scanner.constants import (
-    DEFAULT_CF_TLS_PORTS,
-    DEFAULT_CONCURRENCY,
-    DEFAULT_SPEED_URL,
-    DEFAULT_TIMEOUT,
-    DEFAULT_TRIES,
-    DEFAULT_UPLOAD_URL,
     ISP_CATEGORIES,
     LATENCY_TEST_URLS,
     MAX_DEFAULT_HOSTS,
-    app_dir,
     format_cf_colo,
 )
 from scanner.geoip import format_ip_location
@@ -29,12 +19,10 @@ from scanner.models import (
     AppSettings,
     NavigationBack,
     NavigationExit,
-    ScanInterrupted,
     ScanResult,
     SmartRecommendation,
     VlessConfig,
 )
-from scanner.storage import save_results
 from scanner.targets import (
     expand_targets,
     isp_display_name,
@@ -55,11 +43,11 @@ from scanner.ui.terminal import (
     prompt_continue_nav,
     prompt_int_nav,
     prompt_str,
-    prompt_str_nav,
+    render_fixed_header,
     render_stage,
     show_banner,
 )
-from scanner.xray import check_environment
+from scanner.xray import get_environment_status
 
 try:
     from rich.panel import Panel
@@ -100,7 +88,7 @@ def render_active_settings_panel(v: VlessConfig, settings: AppSettings) -> None:
         panel = make_active_settings_panel(v, settings)
         if panel:
             clear_screen()
-            show_banner(clear=False)
+            render_fixed_header(compact=True, show_controls=False)
             console.print(panel)
     else:
         ports_str = ", ".join(str(p) for p in (settings.ports if settings.ports else [v.port]))
@@ -109,6 +97,36 @@ def render_active_settings_panel(v: VlessConfig, settings: AppSettings) -> None:
         top_t_desc = "All working IPs" if settings.top_targets == 0 else f"Top {settings.top_targets}"
         print("=== Loaded from config.txt ===")
         print(f"Config: {v.remark} ({v.host}:{v.port}) | Ports: {ports_str} | Workers: {settings.workers} | Max Targets: {max_t_str} | Mode: {mode_str} ({top_t_desc})")
+
+
+def render_startup_check(xray_path: Optional[Path]) -> bool:
+    """Render startup environment table with dependency status in the terminal."""
+    env = get_environment_status(xray_path)
+    rows = []
+
+    if env["xray_ok"]:
+        ver = env["xray_version"]
+        xray_status = f"[green]FOUND (v{ver})[/green]" if ver else "[green]FOUND[/green]"
+    else:
+        xray_status = "[red]MISSING[/red]"
+
+    rows.append(("xray.exe / xray", xray_status))
+    rows.append(("geoip.dat", "[green]FOUND[/green]" if env["geoip_ok"] else "[red]MISSING[/red]"))
+    rows.append(("geosite.dat", "[green]FOUND[/green]" if env["geosite_ok"] else "[red]MISSING[/red]"))
+    rows.append(("requests[socks]", "[green]FOUND[/green]" if env["requests_ok"] else "[red]MISSING[/red]"))
+
+    if RICH and console is not None and Table is not None:
+        table = Table(title="Startup Check", box=box.ROUNDED, border_style="cyan")
+        table.add_column("Component", style="white")
+        table.add_column("Status")
+        for name, status in rows:
+            table.add_row(name, status)
+        console.print(table)
+    else:
+        for name, status in rows:
+            print(f"{name}: {status}")
+
+    return bool(env["ok"])
 
 
 def render_welcome_config_screen(
@@ -120,7 +138,7 @@ def render_welcome_config_screen(
     """One combined first page: big logo, startup check, and config entry prompt."""
     clear_screen()
     show_banner(clear=False)
-    env_ok = check_environment(xray, show_help=False)
+    env_ok = render_startup_check(xray)
     if RICH and console is not None and Panel is not None:
         if saved_config:
             try:
@@ -350,80 +368,6 @@ def choose_latency_test_url_tui() -> str:
     return LATENCY_TEST_URLS[idx][1]
 
 
-def choose_ports_tui(v: VlessConfig) -> List[int]:
-    cf_ports_str = ", ".join(str(p) for p in DEFAULT_CF_TLS_PORTS)
-    rows = [
-        ("All 6 Cloudflare TLS Ports", f"{cf_ports_str} (Recommended)"),
-        ("Config Port Only", f"{v.port} (Default from your VLESS link)"),
-        ("Custom Ports", "Enter comma-separated ports manually"),
-    ]
-    idx = key_select_menu("Target Ports (Step 3/4)", rows, default_index=0, allow_back=True)
-    if idx == 0:
-        return list(DEFAULT_CF_TLS_PORTS)
-    elif idx == 1:
-        return [v.port]
-    else:
-        while True:
-            raw = prompt_str_nav("Enter ports separated by commas (e.g. 443, 8443, 2053)", f"{v.port}", allow_back=True)
-            try:
-                ports = []
-                for part in raw.split(","):
-                    p = int(part.strip())
-                    if not (1 <= p <= 65535):
-                        raise ValueError(f"Port out of range 1-65535: {p}")
-                    if p not in ports:
-                        ports.append(p)
-                if not ports:
-                    raise ValueError("No valid ports entered")
-                return ports
-            except Exception as e:
-                cprint(f"Invalid ports: {e}", "red")
-
-
-def ask_scan_settings_tui(v: VlessConfig) -> Tuple[int, int, int, str, Path, List[int], bool]:
-    ports = choose_ports_tui(v)
-    ports_display = ", ".join(str(p) for p in ports)
-    render_stage("Step 3/4 - Scan Parameters", f"Ports: {ports_display} | Set workers & timeout. b/back returns.", "cyan")
-    concurrency = prompt_int_nav("Scan speed / workers", DEFAULT_CONCURRENCY, 1, 200, allow_back=True)
-    timeout = prompt_int_nav("Connection timeout seconds", DEFAULT_TIMEOUT, 2, 60, allow_back=True)
-    use_tcp_prefilter = prompt_confirm_nav("Enable Fast TCP Pre-filter (5-10x speedup)?", True, allow_back=True)
-    tries = DEFAULT_TRIES
-    test_url = choose_latency_test_url_tui()
-    output_dir = app_dir() / "results"
-    return concurrency, timeout, tries, test_url, output_dir, ports, use_tcp_prefilter
-
-
-def confirm_scan_plan_tui(
-    targets: List[str],
-    target_label: str,
-    ports: List[int],
-    concurrency: int,
-    timeout: int,
-    test_url: str,
-    xray: Path,
-    output_dir: Path,
-    use_tcp_prefilter: bool,
-) -> bool:
-    render_stage("Step 4/4 - Ready", "Review the scan plan before starting. Type b/back to return to settings.", "green")
-    ports_display = ", ".join(str(p) for p in ports)
-    total_endpoints = len(targets) * len(ports)
-    if RICH and console is not None and Panel is not None:
-        panel = (
-            f"Target source: [bold]{target_label}[/bold]\n"
-            f"Target IPs: [bold]{len(targets)}[/bold]\n"
-            f"Ports ({len(ports)}): [bold cyan]{ports_display}[/bold cyan]\n"
-            f"Total Endpoints: [bold]{total_endpoints}[/bold]\n"
-            f"TCP Pre-filter: [bold green]{'Enabled' if use_tcp_prefilter else 'Disabled'}[/bold green]\n"
-            f"Scan workers: [bold]{concurrency}[/bold]\n"
-            f"Timeout: [bold]{timeout}s[/bold]\n"
-            f"Latency URL: [bold]{test_url}[/bold]\n"
-            f"Xray: [bold]{xray.name}[/bold]\n"
-            f"Output: [bold]{output_dir}[/bold]"
-        )
-        console.print(Panel(panel, title="Scan Plan", border_style="green", expand=False))
-    else:
-        print(f"Source: {target_label} | IPs: {len(targets)} | Ports: {ports_display} | Total: {total_endpoints} | TCP Pre-filter: {use_tcp_prefilter} | Workers: {concurrency} | Timeout: {timeout}s | URL: {test_url}")
-    return prompt_confirm_nav("Start scan now?", True, allow_back=True)
 
 
 def render_smart_recommendations(recs: List[SmartRecommendation], output_dir: Path) -> None:
@@ -475,6 +419,8 @@ def show_final_results(
     is_recheck = "rechecked" in filename_prefix and not is_full
 
     output_dir = txt_path.parent
+    display_limit = 25
+    display_items = ok[:display_limit]
 
     if RICH and console is not None and Panel is not None and Table is not None:
         has_longevity = any(r.sustained is not None for r in ok)
@@ -487,7 +433,10 @@ def show_final_results(
         if max_latency_ms > 0 or min_speed_mbps > 0:
             filter_line = f"\nFiltered out: [bold yellow]{filtered_out}[/bold yellow]"
         console.print(Panel(f"[bold green]Scan Finished[/bold green]\n\nWorking Endpoints: [bold green]{len(ok)}[/bold green]\nFailed Endpoints: [bold red]{failed}[/bold red]{filter_line}", border_style="green", expand=False))
-        table = Table(title="Best Results", box=box.ROUNDED, border_style="cyan", expand=False)
+        title_txt = f"Best Results (Showing {min(len(ok), display_limit)} of {len(ok)})" if len(ok) > display_limit else "Best Results"
+        table = Table(title=title_txt, box=box.ROUNDED, border_style="cyan", expand=False)
+        if len(ok) > display_limit:
+            table.caption = f"[dim]Showing top {display_limit} of {len(ok)} endpoints. Full results saved to {txt_path.name}[/dim]"
         table.add_column("#", justify="right", style="dim", no_wrap=True)
         table.add_column("IP", style="bold white", no_wrap=True)
         table.add_column("Port", justify="center", style="bold cyan", no_wrap=True)
@@ -506,7 +455,7 @@ def show_final_results(
                 table.add_column("AntiDrop", justify="center", no_wrap=True)
             table.add_column("Pass", justify="right", no_wrap=True)
             table.add_column("HTTP", justify="right", no_wrap=True)
-            for i, r in enumerate(ok[:25], 1):
+            for i, r in enumerate(display_items, 1):
                 down = f"{r.speed_mbps:.1f}M" if r.speed_mbps is not None else "-"
                 up = f"{r.upload_mbps:.1f}M" if r.upload_mbps is not None else "-"
                 latency = f"{r.latency_ms:.0f}ms" if r.latency_ms is not None else "-"
@@ -536,7 +485,7 @@ def show_final_results(
             table.add_column("DPI Loss", justify="right", style="magenta", no_wrap=True)
             table.add_column("Latency", justify="right", style="green", no_wrap=True)
             table.add_column("HTTP", justify="right", no_wrap=True)
-            for i, r in enumerate(ok[:25], 1):
+            for i, r in enumerate(display_items, 1):
                 drop_badge = "[green]Pass[/green]" if r.sustained else "[red]Drop[/red]"
                 loss = f"{r.longevity_loss:.0f}%" if r.longevity_loss is not None else "-"
                 latency = f"{r.latency_ms:.0f}ms" if r.latency_ms is not None else "-"
@@ -552,7 +501,7 @@ def show_final_results(
             if has_upload:
                 table.add_column("Up", justify="right", style="bright_magenta", no_wrap=True)
             table.add_column("Downloaded", justify="right", style="cyan", no_wrap=True)
-            for i, r in enumerate(ok[:25], 1):
+            for i, r in enumerate(display_items, 1):
                 down = f"{r.speed_mbps:.2f} Mbps" if r.speed_mbps is not None else "-"
                 up = f"{r.upload_mbps:.2f} Mbps" if r.upload_mbps is not None else "-"
                 row = [str(i), r.ip, str(r.port)]
@@ -563,7 +512,7 @@ def show_final_results(
                 row.append(down)
                 if has_upload:
                     row.append(up)
-                row.append(str(r.speed_bytes or "-"))
+                row.append(str(r.download_bytes or "-"))
                 table.add_row(*row)
         elif is_recheck:
             table.add_column("Latency", justify="right", style="green", no_wrap=True)
@@ -573,7 +522,7 @@ def show_final_results(
                 table.add_column("AntiDrop", justify="center", no_wrap=True)
             table.add_column("Pass", justify="right", no_wrap=True)
             table.add_column("HTTP", justify="right", no_wrap=True)
-            for i, r in enumerate(ok[:25], 1):
+            for i, r in enumerate(display_items, 1):
                 latency = f"{r.latency_ms:.0f}ms" if r.latency_ms is not None else "-"
                 jitter = f"{r.jitter_ms:.0f}ms" if r.jitter_ms is not None else "-"
                 loss = f"{r.packet_loss:.0f}%"
@@ -596,7 +545,7 @@ def show_final_results(
         else:
             table.add_column("Latency", justify="right", style="green", no_wrap=True)
             table.add_column("HTTP", justify="right", no_wrap=True)
-            for i, r in enumerate(ok[:25], 1):
+            for i, r in enumerate(display_items, 1):
                 latency = f"{r.latency_ms:.0f}ms" if r.latency_ms is not None else "-"
                 row = [str(i), r.ip, str(r.port)]
                 if has_loc:
@@ -615,7 +564,7 @@ def show_final_results(
         has_loc = any(bool(r.ip_country) for r in ok)
         is_longevity = "longevity" in filename_prefix and not is_full
         print(f"\nScan Finished | Working: {len(ok)} | Failed: {failed} | Filtered: {filtered_out}")
-        for i, r in enumerate(ok[:25], 1):
+        for i, r in enumerate(display_items, 1):
             loc_str = f" loc={format_ip_location(r.ip_country, r.ip_city)}" if r.ip_country else ""
             colo_str = f" colo={format_cf_colo(r.colo, short=True)}" if r.colo else ""
             if is_full:
@@ -635,7 +584,7 @@ def show_final_results(
             elif is_speed:
                 down = f"{r.speed_mbps:.2f} Mbps" if r.speed_mbps is not None else "-"
                 up = f"{r.upload_mbps:.2f} Mbps" if r.upload_mbps is not None else "-"
-                print(f"{i}. {r.ip}:{r.port}{loc_str}{colo_str} down={down} up={up} downloaded={r.speed_bytes or '-'}")
+                print(f"{i}. {r.ip}:{r.port}{loc_str}{colo_str} down={down} up={up} downloaded={r.download_bytes or '-'}")
             elif is_recheck:
                 latency = f"{r.latency_ms:.1f} ms" if r.latency_ms is not None else "-"
                 jitter = f"{r.jitter_ms:.1f} ms" if r.jitter_ms is not None else "-"
@@ -646,6 +595,8 @@ def show_final_results(
             else:
                 latency = f"{r.latency_ms:.1f} ms" if r.latency_ms is not None else "-"
                 print(f"{i}. {r.ip}:{r.port}{loc_str}{colo_str} latency={latency} HTTP {r.status_code}")
+        if len(ok) > display_limit:
+            print(f"... and {len(ok) - display_limit} more endpoints (full list saved to {txt_path.name})")
 
         recs = get_smart_recommendations(ok, vless_config=vless_config)
         render_smart_recommendations(recs, output_dir)
@@ -661,14 +612,8 @@ def handle_post_scan_testing_tui(
     output_dir: Path,
 ) -> Tuple[List[ScanResult], Path, Path, str]:
     """Unified post-scan testing menu: combines Stability/Jitter, Anti-Drop, and Speed Test."""
-    from scanner.engine import (
-        enrich_results_with_colo,
-        run_latency_recheck,
-        run_longevity_tests,
-        run_speed_tests,
-    )
-
     if not working_results:
+
         return working_results, output_dir / "clean_ips.txt", output_dir / "clean_ips.csv", "clean_ips"
 
     menu_rows = [
@@ -694,130 +639,39 @@ def handle_post_scan_testing_tui(
     except NavigationBack:
         return working_results, output_dir / "clean_ips.txt", output_dir / "clean_ips.csv", "clean_ips"
 
-    candidates = sorted(working_results, key=latency_sort_key)[:test_count]
-
     # Mode 0: Full Quality Test
+
     if choice == 0:
         try:
-            sample_count = prompt_int_nav("Ping samples per IP for jitter & loss", 5, 2, 20, allow_back=True)
-            longevity_duration = prompt_int_nav("Anti-Drop endurance duration (seconds, 0 to skip)", 15, 0, 60, allow_back=True)
+            sample_count = prompt_int_nav("Ping samples per IP for jitter & loss", 8, 2, 20, allow_back=True)
+            longevity_duration = prompt_int_nav("Anti-Drop endurance duration (seconds, 0 to skip)", 30, 0, 60, allow_back=True)
             speed_mb = prompt_int_nav("Download size per IP (MB)", 5, 1, 100, allow_back=True)
             upload_mb = prompt_int_nav("Upload size per IP (MB, 0 to skip)", 1, 0, 50, allow_back=True)
             speed_duration = prompt_int_nav("Speed test duration limit (seconds)", 5, 1, 60, allow_back=True)
             workers = prompt_int_nav("Testing workers", min(concurrency, 5), 1, 30, allow_back=True)
         except NavigationBack:
             return working_results, output_dir / "clean_ips.txt", output_dir / "clean_ips.csv", "clean_ips"
-
-        render_stage("Testing Stability & Jitter", f"Testing {len(candidates)} endpoints ({sample_count} pings each)...", "magenta")
-        try:
-            rechecked = run_latency_recheck(v, candidates, xray, workers, timeout, sample_count, test_url, "warning")
-        except ScanInterrupted as interrupted:
-            rechecked = interrupted.results
-            txt, csvp = save_results(rechecked, output_dir, "clean_ips_full_interrupted", vless_config=v)
-            return rechecked, txt, csvp, "clean_ips_full_interrupted"
-
-        survivors = [r for r in rechecked if r.ok and r.packet_loss < 100.0]
-        if not survivors:
-            cprint("No endpoints survived stability test.", "yellow")
-            txt, csvp = save_results(rechecked, output_dir, "clean_ips_rechecked", vless_config=v)
-            return rechecked, txt, csvp, "clean_ips_rechecked"
-
-        # Anti-Drop Endurance Test
-        if longevity_duration > 0:
-            render_stage(
-                "Testing Anti-Drop (DPI Endurance)",
-                f"Testing sustained connection on {len(survivors)} endpoints ({longevity_duration}s continuous)...",
-                "green",
-                clear=False,
-            )
-            try:
-                survivors = run_longevity_tests(
-                    v,
-                    survivors,
-                    xray,
-                    workers=min(workers, 5),
-                    duration=longevity_duration,
-                    timeout=timeout,
-                    url=test_url,
-                )
-            except ScanInterrupted as interrupted:
-                survivors = interrupted.results
-                txt, csvp = save_results(survivors, output_dir, "clean_ips_full_interrupted", vless_config=v)
-                return survivors, txt, csvp, "clean_ips_full_interrupted"
-
-        up_text = f", {upload_mb}MB up" if upload_mb > 0 else ""
-        render_stage("Testing Download & Upload Speed", f"Testing speed on {len(survivors)} surviving endpoints ({speed_mb}MB down{up_text})...", "magenta", clear=False)
-        try:
-            tested = run_speed_tests(
-                v,
-                survivors,
-                xray,
-                workers,
-                max(timeout, speed_duration + 10),
-                speed_mb * 1024 * 1024,
-                speed_duration,
-                DEFAULT_SPEED_URL,
-                "warning",
-                test_upload=(upload_mb > 0),
-                upload_bytes=upload_mb * 1024 * 1024,
-                upload_url=DEFAULT_UPLOAD_URL,
-            )
-        except ScanInterrupted as interrupted:
-            tested = interrupted.results
-            txt, csvp = save_results(tested, output_dir, "clean_ips_full_interrupted", include_speed_errors=True, vless_config=v)
-            return tested, txt, csvp, "clean_ips_full_interrupted"
-
-        enrich_results_with_colo(v, tested, xray, workers=workers, timeout=timeout)
-        tested = sorted(tested, key=full_sort_key)
-        txt, csvp = save_results(tested, output_dir, "clean_ips_full_tested", include_speed_errors=True, vless_config=v)
-        return tested, txt, csvp, "clean_ips_full_tested"
-
+        mode = "full"
     # Mode 1: Stability & Jitter only
     elif choice == 1:
         try:
-            sample_count = prompt_int_nav("Ping samples per IP for jitter & loss", 5, 2, 20, allow_back=True)
+            sample_count = prompt_int_nav("Ping samples per IP for jitter & loss", 8, 2, 20, allow_back=True)
             workers = prompt_int_nav("Testing workers", min(concurrency, 10), 1, 50, allow_back=True)
         except NavigationBack:
             return working_results, output_dir / "clean_ips.txt", output_dir / "clean_ips.csv", "clean_ips"
-
-        render_stage("Testing Stability & Jitter", f"Testing {len(candidates)} endpoints ({sample_count} pings each)...", "magenta")
-        try:
-            rechecked = run_latency_recheck(v, candidates, xray, workers, timeout, sample_count, test_url, "warning")
-            enrich_results_with_colo(v, rechecked, xray, workers=workers, timeout=timeout)
-            txt, csvp = save_results(rechecked, output_dir, "clean_ips_rechecked", vless_config=v)
-            return rechecked, txt, csvp, "clean_ips_rechecked"
-        except ScanInterrupted as interrupted:
-            rechecked = interrupted.results
-            txt, csvp = save_results(rechecked, output_dir, "clean_ips_rechecked_interrupted", vless_config=v)
-            return rechecked, txt, csvp, "clean_ips_rechecked_interrupted"
-
+        mode = "stability"
+        longevity_duration = 0
+        speed_mb, upload_mb, speed_duration = 0, 0, 0
     # Mode 2: Anti-Drop / DPI Endurance only
     elif choice == 2:
         try:
-            longevity_duration = prompt_int_nav("Anti-Drop endurance duration (seconds)", 15, 5, 60, allow_back=True)
+            longevity_duration = prompt_int_nav("Anti-Drop endurance duration (seconds)", 30, 5, 60, allow_back=True)
             workers = prompt_int_nav("Testing workers", min(concurrency, 5), 1, 30, allow_back=True)
         except NavigationBack:
             return working_results, output_dir / "clean_ips.txt", output_dir / "clean_ips.csv", "clean_ips"
-
-        render_stage("Testing Anti-Drop (DPI Endurance)", f"Testing sustained connection on {len(candidates)} endpoints ({longevity_duration}s continuous)...", "green")
-        try:
-            tested = run_longevity_tests(
-                v,
-                candidates,
-                xray,
-                workers=workers,
-                duration=longevity_duration,
-                timeout=timeout,
-                url=test_url,
-            )
-            enrich_results_with_colo(v, tested, xray, workers=workers, timeout=timeout)
-            txt, csvp = save_results(tested, output_dir, "clean_ips_longevity", vless_config=v)
-            return tested, txt, csvp, "clean_ips_longevity"
-        except ScanInterrupted as interrupted:
-            tested = interrupted.results
-            txt, csvp = save_results(tested, output_dir, "clean_ips_longevity_interrupted", vless_config=v)
-            return tested, txt, csvp, "clean_ips_longevity_interrupted"
-
+        mode = "longevity"
+        sample_count = 0
+        speed_mb, upload_mb, speed_duration = 0, 0, 0
     # Mode 3: Speed Test only
     else:
         try:
@@ -827,28 +681,36 @@ def handle_post_scan_testing_tui(
             workers = prompt_int_nav("Testing workers", min(concurrency, 5), 1, 30, allow_back=True)
         except NavigationBack:
             return working_results, output_dir / "clean_ips.txt", output_dir / "clean_ips.csv", "clean_ips"
+        mode = "speed"
+        sample_count = 0
+        longevity_duration = 0
 
-        up_text = f", {upload_mb}MB up" if upload_mb > 0 else ""
-        render_stage("Testing Download & Upload Speed", f"Testing speed on {len(candidates)} endpoints ({speed_mb}MB down{up_text})...", "magenta")
-        try:
-            tested = run_speed_tests(
-                v,
-                candidates,
-                xray,
-                workers,
-                max(timeout, speed_duration + 10),
-                speed_mb * 1024 * 1024,
-                speed_duration,
-                DEFAULT_SPEED_URL,
-                "warning",
-                test_upload=(upload_mb > 0),
-                upload_bytes=upload_mb * 1024 * 1024,
-                upload_url=DEFAULT_UPLOAD_URL,
-            )
-            enrich_results_with_colo(v, tested, xray, workers=workers, timeout=timeout)
-            txt, csvp = save_results(tested, output_dir, "clean_ips_speed_tested", include_speed_errors=True, vless_config=v)
-            return tested, txt, csvp, "clean_ips_speed_tested"
-        except ScanInterrupted as interrupted:
-            tested = interrupted.results
-            txt, csvp = save_results(tested, output_dir, "clean_ips_speed_tested_interrupted", include_speed_errors=True, vless_config=v)
-            return tested, txt, csvp, "clean_ips_speed_tested_interrupted"
+    from scanner.engine import execute_configured_post_scan_tests
+    from scanner.models import AppSettings
+    from scanner.ui.terminal import cprint, progress_reporter, render_stage
+
+    post_settings = AppSettings(
+        post_scan_mode=mode,
+        top_targets=test_count,
+        ping_samples=sample_count,
+        longevity_test=(longevity_duration > 0),
+        longevity_duration=longevity_duration,
+        download_mb=speed_mb,
+        upload_mb=upload_mb,
+        speed_duration=speed_duration,
+        speed_workers=workers,
+        timeout=timeout,
+        test_url=test_url,
+    )
+
+    return execute_configured_post_scan_tests(
+        post_settings,
+        v,
+        working_results,
+        xray,
+        output_dir,
+        on_stage=render_stage,
+        on_message=cprint,
+        make_reporter=progress_reporter,
+    )
+

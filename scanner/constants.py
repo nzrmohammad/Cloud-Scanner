@@ -1,5 +1,6 @@
-from pathlib import Path
 import sys
+from pathlib import Path
+from typing import Optional
 
 APP_NAME = "Cloud Scanner"
 APP_VERSION = "v0.2.0"
@@ -8,7 +9,7 @@ APP_URL = "https://t.me/Nzrmohammad"
 APP_HEADER = f"{APP_NAME} {APP_VERSION} | {APP_CHANNEL}"
 
 DEFAULT_CF_TLS_PORTS = (443, 8443, 2053, 2083, 2087, 2096)
-DEFAULT_CONCURRENCY = 66
+DEFAULT_CONCURRENCY = 25
 DEFAULT_TIMEOUT = 2
 DEFAULT_TRIES = 1
 MAX_DEFAULT_HOSTS = 0
@@ -16,9 +17,17 @@ MAX_DEFAULT_HOSTS = 0
 DEFAULT_URL = "https://www.gstatic.com/generate_204"
 DEFAULT_SPEED_URL = "https://speed.cloudflare.com/__down?bytes={bytes}"
 DEFAULT_UPLOAD_URL = "https://speed.cloudflare.com/__up"
-DEFAULT_SPEED_BYTES = 5 * 1024 * 1024
-DEFAULT_UPLOAD_BYTES = 1 * 1024 * 1024
-DEFAULT_LONGEVITY_DURATION = 15
+NETWORK_BYTES_PER_MB = 1_000_000  # Decimal SI standard for networking & speedtests (1 MB = 1,000,000 bytes)
+
+
+def mb_to_bytes(mb: int) -> int:
+    """Convert Megabytes to bytes using networking decimal standard (1 MB = 1,000,000 bytes)."""
+    return mb * NETWORK_BYTES_PER_MB
+
+
+DEFAULT_SPEED_BYTES = mb_to_bytes(5)
+DEFAULT_UPLOAD_BYTES = mb_to_bytes(1)
+DEFAULT_LONGEVITY_DURATION = 30
 
 LATENCY_TEST_URLS = [
     ("Google generate_204", "https://www.gstatic.com/generate_204", "Fast & globally reliable (Recommended)"),
@@ -216,7 +225,7 @@ vless = {vless}
 ports = 443, 8443, 2053, 2083, 2087, 2096
 
 # Scan Speed / Workers (سرعت اسکن / تعداد ورکرها)
-workers = 66
+workers = 25
 
 # Timeout in seconds (مهلت اتصال به ثانیه)
 timeout = 2
@@ -243,18 +252,18 @@ max_targets = 0
 post_scan_mode = full
 
 # Top targets count to test for quality & speed (تعداد برترین اهداف جهت تست سرعت و پایداری)
-# عدد 0 یا all یعنی تمام آی‌پی‌های سالم پیدا شده تست شوند؛ یا یک عدد (مثلاً 10 یا 20) برای گلچین برترین‌ها بر اساس کمترین پینگ
-top_targets = 10
+# عدد 0 یا all یعنی تمام آی‌پی‌های سالم پیدا شده تست شوند؛ یا یک عدد (مثلاً 30 یا 50) برای گلچین برترین‌ها بر اساس کمترین پینگ
+top_targets = 30
 
 # Ping samples for stability & jitter test (تعداد پینگ تست پایداری و جیتر)
-ping_samples = 5
+ping_samples = 8
 
 # Anti-Drop / Longevity endurance test (تست مقاومت در برابر قطع شدن توسط فیلترینگ DPI)
 # بررسی زنده ماندن اتصال در طول زمان و عدم ارسال پکت‌های قطع اتصال (TCP RST)
 longevity_test = true
 
 # Longevity test duration in seconds (مدت زمان تست پایداری مداوم به ثانیه)
-longevity_duration = 15
+longevity_duration = 30
 
 # Download test size in MB (حجم فایل دانلود تستی بر حسب مگابایت)
 download_mb = 5
@@ -264,6 +273,9 @@ upload_mb = 1
 
 # Max test duration per IP in seconds (محدودیت زمان تست سرعت)
 speed_duration = 5
+
+# Speed test concurrency workers (تعداد ورکر همزمان برای تست سرعت)
+speed_workers = 5
 """
 
 

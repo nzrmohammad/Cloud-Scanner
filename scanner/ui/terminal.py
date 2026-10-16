@@ -1,6 +1,7 @@
 import os
 import sys
-from typing import Optional
+from contextlib import contextmanager
+from typing import Any, Callable, Generator, Optional
 
 if sys.platform == "win32":
     try:
@@ -11,14 +12,21 @@ if sys.platform == "win32":
     except Exception:
         pass
 
-from scanner.constants import APP_NAME, APP_VERSION, APP_HEADER, APP_CHANNEL
-from scanner.models import NavigationBack
+from scanner.constants import APP_CHANNEL, APP_HEADER, APP_NAME, APP_VERSION
+from scanner.models import NavigationBack, ScanResult
 
 try:
     from rich import box
     from rich.align import Align
     from rich.console import Console
     from rich.panel import Panel
+    from rich.progress import (
+        BarColumn,
+        Progress,
+        SpinnerColumn,
+        TextColumn,
+        TimeElapsedColumn,
+    )
     from rich.prompt import Confirm, IntPrompt, Prompt
     from rich.text import Text
 
@@ -33,6 +41,11 @@ except ImportError:
     IntPrompt = None  # type: ignore
     Prompt = None  # type: ignore
     Text = None  # type: ignore
+    BarColumn = None  # type: ignore
+    Progress = None  # type: ignore
+    SpinnerColumn = None  # type: ignore
+    TextColumn = None  # type: ignore
+    TimeElapsedColumn = None  # type: ignore
     console = None  # type: ignore
     RICH = False
 
@@ -50,7 +63,34 @@ def cprint(text: str = "", style: Optional[str] = None) -> None:
         print(text)
 
 
+@contextmanager
+def tui_screen() -> Generator[None, None, None]:
+    """Context manager entering the terminal's alternate screen buffer.
+    Ensures cursor visibility and clean restoration on exit, error, or Ctrl+C.
+    """
+    if RICH and console is not None and getattr(console, "is_terminal", False):
+        try:
+            with console.screen():
+                yield
+        finally:
+            try:
+                console.show_cursor(True)
+            except Exception:
+                pass
+    else:
+        try:
+            yield
+        finally:
+            if sys.stdout.isatty():
+                try:
+                    sys.stdout.write("\033[?25h")
+                    sys.stdout.flush()
+                except Exception:
+                    pass
+
+
 def clear_screen() -> None:
+    """Reliably clear the terminal screen and scrollback buffer across Windows and Unix."""
     if os.name == "nt":
         try:
             os.system("cls")
@@ -64,35 +104,43 @@ def clear_screen() -> None:
             return
         except Exception:
             pass
-    if RICH and console is not None:
+    if RICH and console is not None and getattr(console, "is_terminal", False):
         try:
             console.clear()
             return
         except Exception:
             pass
-    print("\n" * 2, end="")
+    print("\n" * 4, end="")
 
 
+def make_fixed_header_panel(compact: bool = True, show_controls: bool = False) -> Any:
+    """Create renderable boxed header Panel."""
+    if not (RICH and Panel is not None):
+        return None
+    content = Text()
+    content.append(APP_NAME, style="bold cyan")
+    content.append(f" {APP_VERSION}", style="bold magenta")
+    content.append("  |  Telegram: ", style="dim white")
+    content.append(APP_CHANNEL, style="bold green")
+    if not compact:
+        content.append("\nClean-IP Scanner for VLESS + Xray", style="white")
+    if show_controls:
+        content.append("\n\nUp/Down move   Space toggle   Enter confirm   Numbers still work", style="dim")
+    return Panel(content, border_style="cyan", box=box.ROUNDED, expand=False)
 
-def render_fixed_header(compact: bool = True, show_controls: bool = True) -> None:
+
+def render_fixed_header(compact: bool = True, show_controls: bool = False) -> None:
     """Render the fixed boxed header for post-login TUI screens."""
-    if RICH and console is not None:
-        content = Text()
-        content.append(APP_NAME, style="bold cyan")
-        content.append(f" {APP_VERSION}", style="bold magenta")
-        content.append("  |  Telegram: ", style="dim white")
-        content.append(APP_CHANNEL, style="bold green")
-        if not compact:
-            content.append("\nClean-IP Scanner for VLESS + Xray", style="white")
-        if show_controls:
-            content.append("\n\nUp/Down move   Space toggle   Enter confirm   Numbers still work", style="dim")
-        console.print(Panel(content, border_style="cyan", box=box.ROUNDED, expand=False))
+    panel = make_fixed_header_panel(compact=compact, show_controls=show_controls)
+    if panel is not None and console is not None:
+        console.print(panel)
         console.print()
     else:
         print(f"==== {APP_HEADER} ====")
         if show_controls:
             print("Up/Down move   Space toggle   Enter confirm   Numbers still work")
         print()
+
 
 
 def show_banner(clear: bool = True) -> None:
@@ -108,7 +156,7 @@ def show_banner(clear: bool = True) -> None:
         logo.append("  ╚═╝  ╚═╝╚═╝  ╚═╝╚═╝  ╚═╝      ╚═════╝╚═╝     ╚══════╝\n", style="bold cyan")
         subtitle = Text("Cloudflare Clean-IP Scanner for VLESS + Xray Core", style="white")
         version = Text(f"{APP_HEADER}", style="bold magenta")
-        console.print(Panel(Align.center(logo + Text("\n") + version + Text("\n") + subtitle), border_style="cyan", box=box.DOUBLE))
+        console.print(Panel(Align.center(logo + Text("\n") + version + Text("\n") + subtitle), border_style="cyan", box=box.ROUNDED, expand=False))
     else:
         print(f"==== {APP_HEADER} - Cloudflare Clean-IP Scanner ====")
 
@@ -230,3 +278,66 @@ def prompt_continue_nav(message: str = "Press Enter to continue", allow_back: bo
         raw = input(message + (" / b=back" if allow_back else "") + ": ").strip()
     if allow_back and is_back_value(str(raw)):
         raise NavigationBack
+
+
+@contextmanager
+def progress_reporter(stage_title: str, total: int, mode: str = "latency") -> Generator[Callable[[ScanResult, int, int], None], None, None]:
+    """Context manager yielding a decoupled progress callback for engine routines."""
+    if RICH and console is not None and Progress is not None and total > 0:
+        progress = Progress(
+            SpinnerColumn("line", style="bold cyan"),
+            TextColumn("[bold cyan]{task.description}"),
+            BarColumn(),
+            TextColumn("{task.completed}/{task.total}"),
+            TimeElapsedColumn(),
+            console=console,
+            refresh_per_second=10,
+        )
+        with progress:
+            task = progress.add_task(stage_title, total=total)
+
+            def _rich_cb(r: ScanResult, completed: int, total_items: int) -> None:
+                if mode == "latency":
+                    if r.ok:
+                        console.print(f"[green]OK[/green]  {r.endpoint:<45} [bold]{r.latency_ms:.1f} ms[/bold]  HTTP {r.status_code}")
+                elif mode == "speed":
+                    down_str = f"DL {r.speed_mbps:.2f} Mbps" if r.speed_mbps is not None else "DL -"
+                    up_str = f"UP {r.upload_mbps:.2f} Mbps" if r.upload_mbps is not None else "UP -"
+                    if r.speed_mbps is not None or r.upload_mbps is not None:
+                        console.print(f"[bright_green]SPD[/bright_green] {r.endpoint:<38} [bold]{down_str}[/bold] | [bold cyan]{up_str}[/bold cyan]")
+                    else:
+                        err = r.speed_error or r.upload_error or "failed"
+                        console.print(f"[yellow]SPD-FAIL[/yellow] {r.endpoint:<38} {err}")
+                elif mode == "recheck":
+                    if r.ok and r.packet_loss < 100.0:
+                        loss_txt = f" loss {r.packet_loss:.0f}%" if r.packet_loss is not None else ""
+                        jit_txt = f" jit {r.jitter_ms:.1f}ms" if r.jitter_ms is not None else ""
+                        console.print(f"[bright_green]RE-OK[/bright_green] {r.endpoint:<38} [bold]{r.latency_ms:.1f} ms avg[/bold]{jit_txt}{loss_txt}  pass {r.recheck_passed}/{r.recheck_total}")
+                    else:
+                        console.print(f"[red]DROP[/red]  {r.endpoint:<38} {r.error}")
+                elif mode == "longevity":
+                    loss_s = f" loss {r.longevity_loss:.0f}%" if r.longevity_loss is not None else ""
+                    if r.sustained:
+                        console.print(f"[bright_green]SUSTAIN[/bright_green] {r.endpoint:<38} [bold]connection held steady[/bold]{loss_s}")
+                    else:
+                        console.print(f"[yellow]DROP[/yellow]    {r.endpoint:<38} [dim]DPI dropped/throttled connection{loss_s}[/dim]")
+                progress.advance(task)
+
+            yield _rich_cb
+    else:
+        def _fallback_cb(r: ScanResult, completed: int, total_items: int) -> None:
+            if mode == "latency" and r.ok:
+                print(f"OK {r.endpoint:<45} {r.latency_ms:.1f} ms HTTP {r.status_code}")
+            elif mode == "speed":
+                down_str = f"DL {r.speed_mbps:.2f} Mbps" if r.speed_mbps is not None else "DL -"
+                print(f"SPD {r.endpoint:<45} {down_str}")
+            elif mode == "recheck" and r.ok:
+                print(f"RE-OK {r.endpoint:<45} {r.latency_ms:.1f} ms")
+            elif mode == "longevity":
+                status = "SUSTAIN" if r.sustained else "DROP"
+                print(f"{status} {r.endpoint:<45}")
+            print(f"{stage_title} progress: {completed}/{total_items}", end="\r")
+
+        yield _fallback_cb
+        print()
+

@@ -1,6 +1,4 @@
 import re
-import sys
-import time
 from typing import Any, List, Optional, Set, Tuple
 
 from scanner.models import NavigationBack, ScanResult, VlessConfig
@@ -11,15 +9,19 @@ from scanner.ui.terminal import (
     clear_screen,
     console,
     cprint,
+    make_fixed_header_panel,
     prompt_str,
-    render_fixed_header,
     render_stage,
 )
 
 try:
+    from rich.console import Group
+    from rich.live import Live
     from rich.panel import Panel
     from rich.table import Table
 except ImportError:
+    Group = None  # type: ignore
+    Live = None  # type: ignore
     Panel = None  # type: ignore
     Table = None  # type: ignore
 
@@ -57,7 +59,7 @@ def parse_multi_select(raw: str, total: int) -> List[int]:
     return sorted(selected)
 
 
-def render_key_menu(
+def build_menu_renderable(
     title: str,
     rows: List[Tuple[str, str]],
     cursor: int,
@@ -66,15 +68,17 @@ def render_key_menu(
     multi: bool = False,
     allow_back: bool = True,
     top_panel: Optional[Any] = None,
-) -> None:
-    clear_screen()
+    error_msg: str = "",
+) -> Any:
     selected = selected or set()
     total_items = len(rows)
 
     import shutil
+
     term_lines = shutil.get_terminal_size((80, 25)).lines
-    overhead = 18 if top_panel is not None else 12
-    max_visible = max(6, min(total_items, term_lines - overhead))
+    overhead = 16 if top_panel is not None else 10
+    available_lines = max(3, term_lines - overhead)
+    max_visible = min(total_items, available_lines)
 
     if total_items <= max_visible:
         start_idx = 0
@@ -89,51 +93,101 @@ def render_key_menu(
             start_idx = cursor - half
         end_idx = min(total_items, start_idx + max_visible)
 
+    if not (RICH and Table is not None and Panel is not None):
+        return None
+
+    elements = []
+    header = make_fixed_header_panel(compact=True, show_controls=False)
+    if header is not None:
+        elements.append(header)
+    if top_panel is not None:
+        elements.append(top_panel)
+
+    title_display = f"{title} [{cursor + 1}/{total_items}]" if total_items > (end_idx - start_idx) else title
+    table = Table(title=title_display, box=box.ROUNDED, border_style="bright_blue")
+    table.add_column("", justify="center", width=4)
+    table.add_column("#", justify="right", width=4, style="cyan")
+    table.add_column("Item", style="bold white")
+    table.add_column("Info", style="dim", no_wrap=True)
+
+    visible_count = end_idx - start_idx
+    for i in range(start_idx, end_idx):
+        name, detail = rows[i]
+        marker = ">" if i == cursor else " "
+        check = "[x]" if i in selected else "[ ]"
+        icon = check if multi else marker
+        row_style = "bold black on cyan" if i == cursor else ("green" if i in selected else "")
+        table.add_row(icon, str(i + 1), name, detail, style=row_style)
+
+    # Pad empty rows to maintain fixed table height when scrolling paginated lists
+    if total_items > max_visible and visible_count < max_visible:
+        for _ in range(max_visible - visible_count):
+            table.add_row("", "", "", "")
+
+    elements.append(table)
+
+    help_text = "[bold]Enter[/bold]=confirm/select   [bold]Up/Down[/bold]=move   [bold]PgUp/PgDn[/bold]=jump 10"
+    if multi:
+        help_text += "   [bold]Space[/bold]=toggle   [bold]A[/bold]=all   [bold]N[/bold]=none"
+    if allow_back:
+        help_text += "   [bold]B/Esc[/bold]=back"
+    help_text += (
+        f"\n[dim]Selected: {len(selected)}/{total_items} items | Numbers: type item # then Enter | Examples: 1 | 1,3,5 | 1-20 | all[/dim]"
+        if multi
+        else "\n[dim]Numeric input: type item number then Enter[/dim]"
+    )
+    if typed:
+        help_text += f"\n[yellow]Typed:[/yellow] {typed}"
+    if error_msg:
+        help_text += f"\n[bold red]Error:[/bold red] {error_msg}"
+
+    elements.append(Panel(help_text, border_style="magenta", expand=False))
+    if Group is not None:
+        return Group(*elements)
+    return elements
+
+
+def render_key_menu(
+    title: str,
+    rows: List[Tuple[str, str]],
+    cursor: int,
+    selected: Optional[Set[int]] = None,
+    typed: str = "",
+    multi: bool = False,
+    allow_back: bool = True,
+    top_panel: Optional[Any] = None,
+    error_msg: str = "",
+) -> None:
+    clear_screen()
     if RICH and console is not None and Table is not None and Panel is not None:
-        render_fixed_header(compact=True, show_controls=True)
-        if top_panel is not None:
-            console.print(top_panel)
-            console.print()
-
-        title_display = f"{title} [{cursor + 1}/{total_items}]" if total_items > (end_idx - start_idx) else title
-        table = Table(title=title_display, box=box.ROUNDED, border_style="bright_blue")
-        table.add_column("", justify="center", width=4)
-        table.add_column("#", justify="right", width=4, style="cyan")
-        table.add_column("Item", style="bold white")
-        table.add_column("Info", style="dim")
-
-        for i in range(start_idx, end_idx):
-            name, detail = rows[i]
-            marker = ">" if i == cursor else " "
-            check = "[x]" if i in selected else "[ ]"
-            icon = check if multi else marker
-            row_style = "bold black on cyan" if i == cursor else ("green" if i in selected else "")
-            table.add_row(icon, str(i + 1), name, detail, style=row_style)
-
-        console.print(table)
-        help_text = "[bold]Enter[/bold]=confirm/select   [bold]Up/Down[/bold]=move   [bold]PgUp/PgDn[/bold]=jump 10"
-        if multi:
-            help_text += "   [bold]Space[/bold]=toggle   [bold]A[/bold]=all   [bold]N[/bold]=none"
-        if allow_back:
-            help_text += "   [bold]B/Esc[/bold]=back"
-        help_text += (
-            f"\n[dim]Selected: {len(selected)}/{total_items} items | Numbers: type item # then Enter | Examples: 1 | 1,3,5 | 1-20 | all[/dim]"
-            if multi
-            else "\n[dim]Numeric input: type item number then Enter[/dim]"
+        renderable = build_menu_renderable(
+            title,
+            rows,
+            cursor,
+            selected=selected,
+            typed=typed,
+            multi=multi,
+            allow_back=allow_back,
+            top_panel=top_panel,
+            error_msg=error_msg,
         )
-        if typed:
-            help_text += f"\n[yellow]Typed:[/yellow] {typed}"
-        console.print(Panel(help_text, border_style="magenta", expand=False))
-    else:
-        print(title)
-        for i in range(start_idx, end_idx):
-            name, detail = rows[i]
-            prefix = ">" if i == cursor else " "
-            check = "[x]" if i in selected else "[ ]"
-            print(f"{prefix} {check if multi else ''} {i+1}) {name} {detail}")
-        print("Use arrows/Enter, or type numbers. B/Esc = back.")
-        if typed:
-            print(f"Typed: {typed}")
+        if renderable is not None:
+            console.print(renderable)
+            return
+
+    selected = selected or set()
+    total_items = len(rows)
+    print(title)
+    for i in range(total_items):
+        name, detail = rows[i]
+        prefix = ">" if i == cursor else " "
+        check = "[x]" if i in selected else "[ ]"
+        print(f"{prefix} {check if multi else ''} {i+1}) {name} {detail}")
+    print("Use arrows/Enter, or type numbers. B/Esc = back.")
+    if typed:
+        print(f"Typed: {typed}")
+    if error_msg:
+        print(f"Error: {error_msg}")
 
 
 def key_select_menu(
@@ -172,48 +226,125 @@ def key_select_menu(
 
     cursor = max(0, min(default_index, len(rows) - 1))
     typed = ""
-    while True:
-        render_key_menu(title, rows, cursor, typed=typed, multi=False, allow_back=allow_back, top_panel=top_panel)
-        key = read_key()
-        if key == "up":
-            cursor = (cursor - 1) % len(rows)
-            continue
-        if key == "down":
-            cursor = (cursor + 1) % len(rows)
-            continue
-        if key == "page_up":
-            cursor = max(0, cursor - 10)
-            continue
-        if key == "page_down":
-            cursor = min(len(rows) - 1, cursor + 10)
-            continue
-        if key == "enter":
-            if typed:
-                raw = typed.strip().lower()
-                typed = ""
-                if allow_back and raw in {"b", "back", "0", "q", "quit", "exit"}:
+    error_msg = ""
+    clear_screen()
+    if RICH and console is not None and Live is not None:
+        initial = build_menu_renderable(
+            title, rows, cursor, typed=typed, multi=False, allow_back=allow_back, top_panel=top_panel
+        )
+        with Live(initial, console=console, auto_refresh=False, transient=False) as live:
+            while True:
+                key = read_key()
+                if error_msg:
+                    error_msg = ""
+                if key == "up":
+                    cursor = (cursor - 1) % len(rows)
+                elif key == "down":
+                    cursor = (cursor + 1) % len(rows)
+                elif key == "page_up":
+                    cursor = max(0, cursor - 10)
+                elif key == "page_down":
+                    cursor = min(len(rows) - 1, cursor + 10)
+                elif key == "enter":
+                    if typed:
+                        raw = typed.strip().lower()
+                        typed = ""
+                        if allow_back and raw in {"b", "back", "0", "q", "quit", "exit"}:
+                            raise NavigationBack
+                        if raw.isdigit() and 1 <= int(raw) <= len(rows):
+                            return int(raw) - 1
+                        error_msg = f"Invalid selection: {raw}. Choose 1-{len(rows)}."
+                        live.update(
+                            build_menu_renderable(
+                                title,
+                                rows,
+                                cursor,
+                                typed=typed,
+                                multi=False,
+                                allow_back=allow_back,
+                                top_panel=top_panel,
+                                error_msg=error_msg,
+                            ),
+                            refresh=True,
+                        )
+                        continue
+                    return cursor
+                elif key == "esc":
+                    if allow_back:
+                        raise NavigationBack
+                elif key == "backspace":
+                    typed = typed[:-1]
+                elif len(key) == 1:
+                    if allow_back and key.lower() in {"b", "q"} and not typed:
+                        raise NavigationBack
+                    if key.isdigit():
+                        candidate = int(key)
+                        if 1 <= candidate <= len(rows) and len(rows) <= 9:
+                            return candidate - 1
+                    if key.isprintable():
+                        typed += key
+
+                live.update(
+                    build_menu_renderable(
+                        title,
+                        rows,
+                        cursor,
+                        typed=typed,
+                        multi=False,
+                        allow_back=allow_back,
+                        top_panel=top_panel,
+                        error_msg=error_msg,
+                    ),
+                    refresh=True,
+                )
+    else:
+        while True:
+            render_key_menu(
+                title,
+                rows,
+                cursor,
+                typed=typed,
+                multi=False,
+                allow_back=allow_back,
+                top_panel=top_panel,
+                error_msg=error_msg,
+            )
+            key = read_key()
+            if error_msg:
+                error_msg = ""
+            if key == "up":
+                cursor = (cursor - 1) % len(rows)
+            elif key == "down":
+                cursor = (cursor + 1) % len(rows)
+            elif key == "page_up":
+                cursor = max(0, cursor - 10)
+            elif key == "page_down":
+                cursor = min(len(rows) - 1, cursor + 10)
+            elif key == "enter":
+                if typed:
+                    raw = typed.strip().lower()
+                    typed = ""
+                    if allow_back and raw in {"b", "back", "0", "q", "quit", "exit"}:
+                        raise NavigationBack
+                    if raw.isdigit() and 1 <= int(raw) <= len(rows):
+                        return int(raw) - 1
+                    error_msg = f"Invalid selection: {raw}. Choose 1-{len(rows)}."
+                    continue
+                return cursor
+            elif key == "esc":
+                if allow_back:
                     raise NavigationBack
-                if raw.isdigit() and 1 <= int(raw) <= len(rows):
-                    return int(raw) - 1
-                cprint("Invalid numeric selection.", "yellow")
-                time.sleep(0.8)
-                continue
-            return cursor
-        if key in {"esc"}:
-            if allow_back:
-                raise NavigationBack
-        if key == "backspace":
-            typed = typed[:-1]
-            continue
-        if len(key) == 1:
-            if allow_back and key.lower() in {"b", "q"} and not typed:
-                raise NavigationBack
-            if key.isdigit():
-                candidate = int(key)
-                if 1 <= candidate <= len(rows) and len(rows) <= 9:
-                    return candidate - 1
-            if key.isprintable():
-                typed += key
+            elif key == "backspace":
+                typed = typed[:-1]
+            elif len(key) == 1:
+                if allow_back and key.lower() in {"b", "q"} and not typed:
+                    raise NavigationBack
+                if key.isdigit():
+                    candidate = int(key)
+                    if 1 <= candidate <= len(rows) and len(rows) <= 9:
+                        return candidate - 1
+                if key.isprintable():
+                    typed += key
 
 
 def key_multi_select_menu(title: str, rows: List[Tuple[str, str]], allow_back: bool = True) -> List[int]:
@@ -246,60 +377,145 @@ def key_multi_select_menu(title: str, rows: List[Tuple[str, str]], allow_back: b
     cursor = 0
     selected: Set[int] = set()
     typed = ""
-    while True:
-        render_key_menu(title, rows, cursor, selected=selected, typed=typed, multi=True, allow_back=allow_back)
-        key = read_key()
-        if key == "up":
-            cursor = (cursor - 1) % len(rows)
-            continue
-        if key == "down":
-            cursor = (cursor + 1) % len(rows)
-            continue
-        if key == "page_up":
-            cursor = max(0, cursor - 10)
-            continue
-        if key == "page_down":
-            cursor = min(len(rows) - 1, cursor + 10)
-            continue
-        if key == "space":
-            if cursor in selected:
-                selected.remove(cursor)
-            else:
+    error_msg = ""
+    clear_screen()
+    if RICH and console is not None and Live is not None:
+        initial = build_menu_renderable(
+            title, rows, cursor, selected=selected, typed=typed, multi=True, allow_back=allow_back
+        )
+        with Live(initial, console=console, auto_refresh=False, transient=False) as live:
+            while True:
+                key = read_key()
+                if error_msg:
+                    error_msg = ""
+                if key == "up":
+                    cursor = (cursor - 1) % len(rows)
+                elif key == "down":
+                    cursor = (cursor + 1) % len(rows)
+                elif key == "page_up":
+                    cursor = max(0, cursor - 10)
+                elif key == "page_down":
+                    cursor = min(len(rows) - 1, cursor + 10)
+                elif key == "space":
+                    if cursor in selected:
+                        selected.remove(cursor)
+                    else:
+                        selected.add(cursor)
+                elif key == "enter":
+                    if typed:
+                        raw = typed.strip().lower()
+                        typed = ""
+                        if allow_back and raw in {"b", "back", "0", "q", "quit", "exit"}:
+                            raise NavigationBack
+                        try:
+                            return parse_multi_select(raw, len(rows))
+                        except Exception as exc:
+                            error_msg = f"Invalid selection: {exc}"
+                            live.update(
+                                build_menu_renderable(
+                                    title,
+                                    rows,
+                                    cursor,
+                                    selected=selected,
+                                    typed=typed,
+                                    multi=True,
+                                    allow_back=allow_back,
+                                    error_msg=error_msg,
+                                ),
+                                refresh=True,
+                            )
+                            continue
+                    if selected:
+                        return sorted(selected)
+                    selected.add(cursor)
+                    return sorted(selected)
+                elif key == "esc":
+                    if allow_back:
+                        raise NavigationBack
+                elif key == "backspace":
+                    typed = typed[:-1]
+                elif len(key) == 1:
+                    low = key.lower()
+                    if allow_back and low in {"b", "q"} and not typed:
+                        raise NavigationBack
+                    if low == "a" and not typed:
+                        selected = set(range(len(rows)))
+                    elif low == "n" and not typed:
+                        selected.clear()
+                    elif key.isprintable():
+                        typed += key
+
+                live.update(
+                    build_menu_renderable(
+                        title,
+                        rows,
+                        cursor,
+                        selected=selected,
+                        typed=typed,
+                        multi=True,
+                        allow_back=allow_back,
+                        error_msg=error_msg,
+                    ),
+                    refresh=True,
+                )
+    else:
+        while True:
+            render_key_menu(
+                title,
+                rows,
+                cursor,
+                selected=selected,
+                typed=typed,
+                multi=True,
+                allow_back=allow_back,
+                error_msg=error_msg,
+            )
+            key = read_key()
+            if error_msg:
+                error_msg = ""
+            if key == "up":
+                cursor = (cursor - 1) % len(rows)
+            elif key == "down":
+                cursor = (cursor + 1) % len(rows)
+            elif key == "page_up":
+                cursor = max(0, cursor - 10)
+            elif key == "page_down":
+                cursor = min(len(rows) - 1, cursor + 10)
+            elif key == "space":
+                if cursor in selected:
+                    selected.remove(cursor)
+                else:
+                    selected.add(cursor)
+            elif key == "enter":
+                if typed:
+                    raw = typed.strip().lower()
+                    typed = ""
+                    if allow_back and raw in {"b", "back", "0", "q", "quit", "exit"}:
+                        raise NavigationBack
+                    try:
+                        return parse_multi_select(raw, len(rows))
+                    except Exception as exc:
+                        error_msg = f"Invalid selection: {exc}"
+                        continue
+                if selected:
+                    return sorted(selected)
                 selected.add(cursor)
-            continue
-        if key == "enter":
-            if typed:
-                raw = typed.strip().lower()
-                typed = ""
-                if allow_back and raw in {"b", "back", "0", "q", "quit", "exit"}:
-                    raise NavigationBack
-                try:
-                    return parse_multi_select(raw, len(rows))
-                except Exception as exc:
-                    cprint(f"Invalid selection: {exc}", "red")
-                    time.sleep(0.9)
-                    continue
-            if selected:
                 return sorted(selected)
-            selected.add(cursor)
-            return sorted(selected)
-        if key in {"esc"}:
-            if allow_back:
-                raise NavigationBack
-        if key == "backspace":
-            typed = typed[:-1]
-            continue
-        if len(key) == 1:
-            low = key.lower()
-            if allow_back and low in {"b", "q"} and not typed:
-                raise NavigationBack
-            if low == "a" and not typed:
-                selected = set(range(len(rows)))
-                continue
-            if low == "n" and not typed:
-                selected.clear()
-            if key.isprintable():
-                typed += key
+            elif key == "esc":
+                if allow_back:
+                    raise NavigationBack
+            elif key == "backspace":
+                typed = typed[:-1]
+            elif len(key) == 1:
+                low = key.lower()
+                if allow_back and low in {"b", "q"} and not typed:
+                    raise NavigationBack
+                if low == "a" and not typed:
+                    selected = set(range(len(rows)))
+                elif low == "n" and not typed:
+                    selected.clear()
+                elif key.isprintable():
+                    typed += key
 
 
 def post_scan_actions_menu(
@@ -333,3 +549,6 @@ def post_scan_actions_menu(
         return "retest_same"
     else:
         return "exit"
+
+
+build_key_menu_renderable = build_menu_renderable

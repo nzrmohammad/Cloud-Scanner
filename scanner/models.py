@@ -1,7 +1,13 @@
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional
-from scanner.constants import app_dir, DEFAULT_URL
+
+from scanner.constants import (
+    DEFAULT_CONCURRENCY,
+    DEFAULT_LONGEVITY_DURATION,
+    DEFAULT_URL,
+    app_dir,
+)
 
 
 @dataclass
@@ -20,13 +26,17 @@ class ScanResult:
     ok: bool = False
     port: int = 443
     latency_ms: Optional[float] = None
+    ttfb_ms: Optional[float] = None
     status_code: Optional[int] = None
     error: str = ""
+    latency_stats: str = ""
     speed_mbps: Optional[float] = None
-    speed_bytes: int = 0
     speed_error: str = ""
+    download_bytes: int = 0
+    download_duration: Optional[float] = None
     upload_mbps: Optional[float] = None
     upload_bytes: int = 0
+    upload_duration: Optional[float] = None
     upload_error: str = ""
     recheck_passed: int = 0
     recheck_total: int = 0
@@ -38,6 +48,14 @@ class ScanResult:
     ip_country: Optional[str] = None
     ip_city: Optional[str] = None
     ip_org: Optional[str] = None
+
+    @property
+    def speed_bytes(self) -> int:
+        return self.download_bytes
+
+    @speed_bytes.setter
+    def speed_bytes(self, val: int) -> None:
+        self.download_bytes = val
 
     @property
     def endpoint(self) -> str:
@@ -61,17 +79,17 @@ class TargetSource:
 class AppSettings:
     vless_raw: str = ""
     ports: List[int] = field(default_factory=lambda: [443, 8443, 2053, 2083, 2087, 2096])
-    workers: int = 66
+    workers: int = DEFAULT_CONCURRENCY
     timeout: int = 2
     tcp_prefilter: bool = True
     test_url: str = DEFAULT_URL
     max_targets: int = 0  # 0 = unlimited
     output_dir: Path = field(default_factory=lambda: app_dir() / "results")
     post_scan_mode: str = "full"  # full, stability, speed, longevity, none
-    top_targets: int = 10
-    ping_samples: int = 5
+    top_targets: int = 30
+    ping_samples: int = 8
     longevity_test: bool = True
-    longevity_duration: int = 15
+    longevity_duration: int = DEFAULT_LONGEVITY_DURATION
     download_mb: int = 5
     upload_mb: int = 1
     speed_duration: int = 5

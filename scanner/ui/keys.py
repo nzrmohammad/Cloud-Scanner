@@ -18,6 +18,8 @@ def read_key() -> str:
         if ch in {"\x00", "\xe0"}:
             ch2 = msvcrt.getwch()
             return {"H": "up", "P": "down", "K": "left", "M": "right", "I": "page_up", "Q": "page_down"}.get(ch2, "")
+        if ch == "\x03":
+            raise KeyboardInterrupt
         if ch == "\r":
             return "enter"
         if ch == "\x1b":
