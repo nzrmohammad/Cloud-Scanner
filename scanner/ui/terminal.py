@@ -190,7 +190,8 @@ def pause(message: str = "Press Enter to continue") -> None:
 
 def prompt_str(message: str, default: Optional[str] = None, password: bool = False) -> str:
     if RICH and Prompt is not None:
-        return Prompt.ask(message, default=default, password=password).strip()
+        res = Prompt.ask(message, default=default, password=password)
+        return (res or "").strip()
     suffix = f" [{default}]" if default else ""
     val = input(f"{message}{suffix}: ").strip()
     return val or (default or "")

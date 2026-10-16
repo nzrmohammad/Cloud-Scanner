@@ -158,7 +158,6 @@ def _target_sources(items: Iterable[str]) -> List[TargetSource]:
 def _expand_sources_exact(sources: List[TargetSource], max_hosts: Optional[int] = None) -> List[str]:
     out: List[str] = []
     seen = set()
-    limited = max_hosts is not None and max_hosts > 0
     for src in sources:
         for n in range(src.start, src.end + 1):
             ip_obj = ipaddress.ip_address(n)
@@ -171,7 +170,7 @@ def _expand_sources_exact(sources: List[TargetSource], max_hosts: Optional[int] 
                 continue
             seen.add(item_str)
             out.append(item_str)
-            if limited and len(out) > int(max_hosts):
+            if max_hosts is not None and max_hosts > 0 and len(out) > max_hosts:
                 raise ValueError(
                     f"Too many targets. Current limit is {max_hosts}. Use max_targets in config.txt to raise it."
                 )
@@ -199,10 +198,10 @@ def _sample_sources_evenly(sources: List[TargetSource], max_hosts: int) -> List[
         used += alloc
         remainders.append((raw - int(raw), version))
     while used > max_hosts:
-        version = max((v for v, a in allocations.items() if a > 1), key=lambda v: allocations[v], default=None)
-        if version is None:
+        cand_v: Optional[int] = max((v for v, a in allocations.items() if a > 1), key=lambda v: allocations[v], default=None)
+        if cand_v is None:
             break
-        allocations[version] -= 1
+        allocations[cand_v] -= 1
         used -= 1
     for _, version in sorted(remainders, reverse=True):
         if used >= max_hosts:

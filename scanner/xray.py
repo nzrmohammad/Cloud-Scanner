@@ -19,7 +19,7 @@ logger = get_logger("xray")
 try:
     import requests
 except ImportError:
-    requests = None
+    requests = None  # type: ignore[assignment]
 
 
 def free_port() -> int:
@@ -288,7 +288,7 @@ class XrayProcess:
 
     def __enter__(self) -> "XrayProcess":
         try:
-            self.temp_dir = tempfile.TemporaryDirectory(prefix="rkh_cfs_", ignore_cleanup_errors=True)
+            self.temp_dir = tempfile.TemporaryDirectory(prefix="rkh_cfs_", ignore_cleanup_errors=True)  # type: ignore[call-overload]
         except TypeError:
             self.temp_dir = tempfile.TemporaryDirectory(prefix="rkh_cfs_")
         cfg_path = Path(self.temp_dir.name) / "config.json"
@@ -373,7 +373,7 @@ class BatchXrayProcess:
 
     def __enter__(self) -> "BatchXrayProcess":
         try:
-            self.temp_dir = tempfile.TemporaryDirectory(prefix="rkh_cfs_batch_", ignore_cleanup_errors=True)
+            self.temp_dir = tempfile.TemporaryDirectory(prefix="rkh_cfs_batch_", ignore_cleanup_errors=True)  # type: ignore[call-overload]
         except TypeError:
             self.temp_dir = tempfile.TemporaryDirectory(prefix="rkh_cfs_batch_")
         cfg_path = Path(self.temp_dir.name) / "config.json"

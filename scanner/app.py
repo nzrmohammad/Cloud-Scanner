@@ -51,7 +51,7 @@ from scanner.xray import find_xray
 try:
     import requests
 except ImportError:
-    requests = None
+    requests = None  # type: ignore[assignment]
 
 logger = get_logger("app")
 

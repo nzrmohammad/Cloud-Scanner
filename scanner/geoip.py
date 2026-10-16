@@ -18,7 +18,7 @@ logger = get_logger("geoip")
 try:
     import requests
 except ImportError:
-    requests = None
+    requests = None  # type: ignore[assignment]
 
 _GEOIP_CACHE_FILE = app_dir() / "results" / "geoip_cache.json"
 _GEOIP_CACHE: Dict[str, Tuple[Optional[str], Optional[str], Optional[str]]] = {}

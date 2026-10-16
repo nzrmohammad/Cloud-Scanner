@@ -1,6 +1,6 @@
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 from scanner.constants import (
     DEFAULT_CONCURRENCY,
@@ -118,7 +118,7 @@ class NavigationExit(Exception):
 class ScanInterrupted(Exception):
     """Raised when Ctrl+C interrupts a scan-like stage after partial results exist."""
 
-    def __init__(self, results: List[ScanResult], stage: str = "scan") -> None:
+    def __init__(self, results: List[Any], stage: str = "scan") -> None:
         super().__init__(f"Interrupted during {stage}")
         self.results = results
         self.stage = stage

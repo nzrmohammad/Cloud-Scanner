@@ -168,7 +168,7 @@ def get_smart_recommendations(
         insta_sorted = sorted(
             insta_candidates,
             key=lambda r: (
-                -r.speed_mbps,
+                -(r.speed_mbps or 0.0),
                 -(r.upload_mbps or 0.0),
                 r.packet_loss,
                 r.latency_ms if r.latency_ms is not None else 9999.0,

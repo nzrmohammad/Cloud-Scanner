@@ -14,9 +14,9 @@ def read_key() -> str:
     if os.name == "nt":
         import msvcrt
 
-        ch = msvcrt.getwch()
+        ch = msvcrt.getwch()  # type: ignore[attr-defined]
         if ch in {"\x00", "\xe0"}:
-            ch2 = msvcrt.getwch()
+            ch2 = msvcrt.getwch()  # type: ignore[attr-defined]
             return {"H": "up", "P": "down", "K": "left", "M": "right", "I": "page_up", "Q": "page_down"}.get(ch2, "")
         if ch == "\x03":
             raise KeyboardInterrupt
@@ -35,9 +35,9 @@ def read_key() -> str:
     import tty
 
     fd = sys.stdin.fileno()
-    old = termios.tcgetattr(fd)
+    old = termios.tcgetattr(fd)  # type: ignore[attr-defined]
     try:
-        tty.setraw(fd)
+        tty.setraw(fd)  # type: ignore[attr-defined]
         ch = sys.stdin.read(1)
         if ch == "\x1b":
             seq = ""
@@ -56,7 +56,7 @@ def read_key() -> str:
             raise KeyboardInterrupt
         return ch
     finally:
-        termios.tcsetattr(fd, termios.TCSADRAIN, old)
+        termios.tcsetattr(fd, termios.TCSADRAIN, old)  # type: ignore[attr-defined]
 
 
 def terminal_supports_keys() -> bool:

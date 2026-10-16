@@ -61,7 +61,7 @@ except ImportError:
 try:
     import requests
 except ImportError:
-    requests = None
+    requests = None  # type: ignore[assignment]
 
 
 def make_active_settings_panel(v: Optional[VlessConfig], settings: Optional[AppSettings]) -> Optional[Any]:

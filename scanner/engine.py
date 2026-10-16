@@ -50,7 +50,7 @@ logger = get_logger("engine")
 try:
     import requests
 except ImportError:
-    requests = None
+    requests = None  # type: ignore[assignment]
 
 
 T = TypeVar("T")
@@ -599,7 +599,8 @@ def longevity_test_ip(
         return out
 
     # Handle legacy url keyword argument if provided
-    effective_stream_url = kwargs.get("url") if ("url" in kwargs and stream_url == DEFAULT_STREAM_URL and kwargs.get("url", "").startswith("http")) else stream_url
+    raw_url = kwargs.get("url")
+    effective_stream_url: str = str(raw_url) if (raw_url and stream_url == DEFAULT_STREAM_URL and str(raw_url).startswith("http")) else str(stream_url)
 
     total_bytes = 0
     stream_interrupted = False
@@ -691,7 +692,8 @@ def run_longevity_tests(
     if not targets:
         return []
 
-    target_stream_url = kwargs.get("url") if ("url" in kwargs and stream_url == DEFAULT_STREAM_URL and kwargs.get("url", "").startswith("http")) else stream_url
+    raw_url = kwargs.get("url")
+    target_stream_url: str = str(raw_url) if (raw_url and stream_url == DEFAULT_STREAM_URL and str(raw_url).startswith("http")) else str(stream_url)
     ev = abort_event or threading.Event()
 
     def _test(r: ScanResult) -> ScanResult:
@@ -740,7 +742,7 @@ def run_scan(
     output_dir: Optional[Path] = None,
     on_stage: Optional[Callable[[str, str, str], None]] = None,
     on_message: Optional[Callable[[str, str], None]] = None,
-    make_reporter: Optional[Callable[[str, int, str], Any]] = None,
+    make_reporter: Optional[Callable[..., Any]] = None,
     on_prefilter_progress: Optional[Callable[[int, int, int], None]] = None,
 ) -> List[ScanResult]:
     """Execute complete initial scan across targets and ports in a headless, decoupled pipeline."""
@@ -883,7 +885,7 @@ def run_stability_stage(
     test_url: str,
     loglevel: str = "warning",
     on_stage: Optional[Callable[[str, str, str], None]] = None,
-    make_reporter: Optional[Callable[[str, int, str], Any]] = None,
+    make_reporter: Optional[Callable[..., Any]] = None,
 ) -> List[ScanResult]:
     """Execute latency recheck and stability testing with optional UI reporter."""
     if on_stage:
@@ -905,7 +907,7 @@ def run_longevity_stage(
     timeout: int,
     loglevel: str = "warning",
     on_stage: Optional[Callable[[str, str, str], None]] = None,
-    make_reporter: Optional[Callable[[str, int, str], Any]] = None,
+    make_reporter: Optional[Callable[..., Any]] = None,
     abort_event: Optional[threading.Event] = None,
 ) -> List[ScanResult]:
     """Execute Anti-Drop endurance testing with optional UI reporter."""
@@ -936,7 +938,7 @@ def run_speed_stage(
     upload_url: str = DEFAULT_UPLOAD_URL,
     loglevel: str = "warning",
     on_stage: Optional[Callable[[str, str, str], None]] = None,
-    make_reporter: Optional[Callable[[str, int, str], Any]] = None,
+    make_reporter: Optional[Callable[..., Any]] = None,
 ) -> List[ScanResult]:
     """Execute bandwidth download and upload benchmarking with optional UI reporter."""
     up_text = f", {upload_mb}MB up" if upload_mb > 0 else ""
@@ -967,7 +969,7 @@ def execute_configured_post_scan_tests(
     output_dir: Path,
     on_stage: Optional[Callable[[str, str, str], None]] = None,
     on_message: Optional[Callable[[str, str], None]] = None,
-    make_reporter: Optional[Callable[[str, int, str], Any]] = None,
+    make_reporter: Optional[Callable[..., Any]] = None,
 ) -> Tuple[List[ScanResult], Path, Path, str]:
     """Execute post-scan stability and/or speed testing automatically according to AppSettings."""
     if not working_results:
