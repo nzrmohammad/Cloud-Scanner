@@ -145,21 +145,27 @@ def fast_tcp_filter(
         return []
     max_w = min(workers, total, 30)
     done = 0
-    with ThreadPoolExecutor(max_workers=max_w) as ex:
+    with DaemonThreadPoolExecutor(max_workers=max_w) as ex:
         futures = {ex.submit(check_tcp_port, ip, port, timeout): (ip, port) for ip, port in target_pairs}
-        for fut in as_completed(futures):
-            pair = futures[fut]
-            try:
-                if fut.result():
-                    alive.append(pair)
-            except Exception as exc:
-                logger.debug("TCP prefilter error for %s:%d: %s", pair[0], pair[1], exc)
-            done += 1
-            if on_progress:
+        try:
+            for fut in as_completed(futures):
+                pair = futures[fut]
                 try:
-                    on_progress(done, total, len(alive))
+                    if fut.result():
+                        alive.append(pair)
                 except Exception as exc:
-                    logger.debug("Prefilter on_progress error: %s", exc)
+                    logger.debug("TCP prefilter error for %s:%d: %s", pair[0], pair[1], exc)
+                done += 1
+                if on_progress:
+                    try:
+                        on_progress(done, total, len(alive))
+                    except Exception as exc:
+                        logger.debug("Prefilter on_progress error: %s", exc)
+        except KeyboardInterrupt as exc:
+            for fut in futures:
+                fut.cancel()
+            ex.shutdown(wait=False, cancel_futures=True)
+            raise ScanInterrupted([], "tcp_prefilter") from exc
     return alive
 
 
@@ -173,14 +179,23 @@ def save_tcp_alive_endpoints(
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    tcp_alive_file = output_dir / "tcp_alive.txt"
+    tcp_alive_file = output_dir / "tcp_alive_with_port.txt"
     tcp_ips_file = output_dir / "tcp_alive_ips.txt"
 
-    endpoint_lines = [f"[{ip}]:{port}" if ":" in ip else f"{ip}:{port}" for ip, port in alive_endpoints]
+    endpoint_lines = [
+        "# Cloud Scanner - Fast TCP Pre-filter Alive Endpoints (IP:port)",
+        f"# Total alive: {len(alive_endpoints)} | Timestamp: {time.strftime('%Y-%m-%d %H:%M:%S')}",
+    ]
+    endpoint_lines.extend(f"[{ip}]:{port}" if ":" in ip else f"{ip}:{port}" for ip, port in alive_endpoints)
     tcp_alive_file.write_text("\n".join(endpoint_lines) + "\n", encoding="utf-8")
 
     unique_ips = list(dict.fromkeys(ip for ip, _ in alive_endpoints))
-    tcp_ips_file.write_text("\n".join(unique_ips) + "\n", encoding="utf-8")
+    ip_lines = [
+        "# Cloud Scanner - Fast TCP Pre-filter Unique Alive IPs",
+        f"# Total unique IPs: {len(unique_ips)} | Timestamp: {time.strftime('%Y-%m-%d %H:%M:%S')}",
+    ]
+    ip_lines.extend(unique_ips)
+    tcp_ips_file.write_text("\n".join(ip_lines) + "\n", encoding="utf-8")
 
     return tcp_alive_file, tcp_ips_file
 
@@ -267,135 +282,170 @@ def speed_test_ip(
     try:
         with XrayProcess(xray, v, ip, port, loglevel=loglevel, ready_timeout=min(3.0, float(timeout))) as xp:
             proxies = xp.proxies
+            preliminary_mbps: Optional[float] = None
 
-            # 1. Download Speed Test with Warmup, TTFB isolation, Adaptive Sizing & Median Filtering
-            if speed_bytes > 0:
-                warmup_size = min(speed_bytes, mb_to_bytes(1) // 4)
-                warmup_url = speed_url_template.format(bytes=warmup_size)
-                preliminary_mbps: Optional[float] = None
+            with requests.Session() as session:
+                session.proxies = proxies
 
-                # Warmup phase: establishes TCP window size, isolates TTFB, measures preliminary throughput
-                try:
-                    w_req_start = time.perf_counter()
-                    with requests.get(
-                        warmup_url,
-                        proxies=proxies,
-                        timeout=min(3.0, float(timeout)),
-                        stream=True,
-                        headers={"User-Agent": APP_HEADER},
-                    ) as w:
-                        ttfb = (time.perf_counter() - w_req_start) * 1000.0
-                        out.ttfb_ms = round(ttfb, 1)
+                # 1. Download Speed Test with Warmup, TTFB isolation, Adaptive Sizing & Median Filtering
+                if speed_bytes > 0:
+                    warmup_size = min(speed_bytes, mb_to_bytes(1) // 4)
+                    warmup_url = speed_url_template.format(bytes=warmup_size)
 
-                        w_downloaded = 0
-                        w_transfer_start = time.perf_counter()
-                        for chunk in w.iter_content(chunk_size=64 * 1024):
-                            if not chunk:
-                                break
-                            w_downloaded += len(chunk)
-                        w_elapsed = time.perf_counter() - w_transfer_start
-                        if w_elapsed > 0.02 and w_downloaded > 0:
-                            preliminary_mbps = (w_downloaded * 8) / (w_elapsed * 1_000_000)
-                except Exception as exc:
-                    logger.debug("Warmup error for %s: %s", out.endpoint, exc)
-
-                # Adaptive payload sizing based on preliminary throughput:
-                # - Very slow (< 20 Mbps): shrink to ~2 MB so test finishes promptly without socket timeout
-                # - Very fast (> 100 Mbps): expand to ~20 MB to properly saturate high-BDP pipe
-                # - Normal (20..100 Mbps): maintain configured speed_bytes (typically 5 MB)
-                target_bytes = speed_bytes
-                if preliminary_mbps is not None:
-                    if preliminary_mbps < 20.0:
-                        target_bytes = min(speed_bytes, mb_to_bytes(2))
-                    elif preliminary_mbps > 100.0:
-                        target_bytes = max(speed_bytes, mb_to_bytes(20))
-
-                # Multi-burst measurement: run 2-3 iterations taking the median to filter network jitter
-                num_bursts = 3 if speed_duration >= 4 else 2
-                per_burst_duration = max(1.5, float(speed_duration) / float(num_bursts)) if speed_duration > 0 else float(timeout)
-
-                burst_speeds: List[float] = []
-                total_downloaded = 0
-                total_duration = 0.0
-                burst_url = speed_url_template.format(bytes=target_bytes)
-
-                start_all_bursts = time.perf_counter()
-                burst_deadline = start_all_bursts + speed_duration if speed_duration > 0 else start_all_bursts + timeout
-
-                for burst_idx in range(num_bursts):
-                    if time.perf_counter() >= burst_deadline - 0.2 and burst_speeds:
-                        break
+                    # Warmup phase: establishes TCP window size, isolates TTFB, measures preliminary throughput
                     try:
-                        req_start = time.perf_counter()
-                        with requests.get(
-                            burst_url,
-                            proxies=proxies,
-                            timeout=timeout,
+                        w_req_start = time.perf_counter()
+                        with session.get(
+                            warmup_url,
+                            timeout=min(4.0, float(timeout)),
                             stream=True,
                             headers={"User-Agent": APP_HEADER},
-                        ) as r:
-                            if out.ttfb_ms is None:
-                                out.ttfb_ms = round((time.perf_counter() - req_start) * 1000.0, 1)
+                        ) as w:
+                            ttfb = (time.perf_counter() - w_req_start) * 1000.0
+                            out.ttfb_ms = round(ttfb, 1)
 
-                            if not (200 <= r.status_code < 400):
-                                if not out.speed_error:
-                                    out.speed_error = f"HTTP {r.status_code}"
-                                continue
-
-                            burst_downloaded = 0
-                            transfer_start = time.perf_counter()
-                            run_deadline = transfer_start + per_burst_duration
-
-                            for chunk in r.iter_content(chunk_size=32 * 1024):
+                            w_downloaded = 0
+                            w_transfer_start = time.perf_counter()
+                            for chunk in w.iter_content(chunk_size=64 * 1024):
                                 if not chunk:
                                     break
-                                burst_downloaded += len(chunk)
-                                if time.perf_counter() >= run_deadline or time.perf_counter() >= burst_deadline:
-                                    break
+                                w_downloaded += len(chunk)
+                            w_elapsed = time.perf_counter() - w_transfer_start
+                            if w_elapsed > 0.02 and w_downloaded > 0:
+                                preliminary_mbps = (w_downloaded * 8) / (w_elapsed * 1_000_000)
+                    except Exception as exc:
+                        logger.debug("Warmup error for %s: %s", out.endpoint, exc)
 
-                            transfer_elapsed = time.perf_counter() - transfer_start
-                            if transfer_elapsed > 0.04 and burst_downloaded > 0:
-                                b_mbps = (burst_downloaded * 8) / (transfer_elapsed * 1_000_000)
-                                burst_speeds.append(b_mbps)
-                                total_downloaded += burst_downloaded
-                                total_duration += transfer_elapsed
-                    except Exception as b_exc:
-                        logger.debug("Download burst %d failed for %s: %s", burst_idx + 1, out.endpoint, b_exc)
+                    # Adaptive payload sizing based on preliminary throughput:
+                    # - Very slow (< 20 Mbps): shrink to ~2 MB so test finishes promptly without socket timeout
+                    # - Very fast (> 100 Mbps): expand to ~20 MB to properly saturate high-BDP pipe
+                    # - Normal (20..100 Mbps): maintain configured speed_bytes (typically 5 MB)
+                    target_bytes = speed_bytes
+                    if preliminary_mbps is not None:
+                        if preliminary_mbps < 20.0:
+                            target_bytes = min(speed_bytes, mb_to_bytes(2))
+                        elif preliminary_mbps > 100.0:
+                            target_bytes = max(speed_bytes, mb_to_bytes(20))
 
-                if burst_speeds:
-                    out.speed_mbps = round(float(statistics.median(burst_speeds)), 2)
-                    out.download_bytes = total_downloaded
-                    out.download_duration = round(total_duration, 3)
-                    out.speed_error = ""
-                elif not out.speed_error:
-                    out.speed_error = "Insufficient data received"
+                    # Multi-burst measurement: run 2-3 iterations taking the median to filter network jitter
+                    num_bursts = 3 if speed_duration >= 4 else 2
+                    per_burst_duration = max(1.5, float(speed_duration) / float(num_bursts)) if speed_duration > 0 else float(timeout)
 
-            # 2. Upload Speed Test (Isolated Handshake & Zero-RAM Stream)
-            if test_upload and upload_bytes > 0:
-                payload = StreamUploadPayload(upload_bytes)
-                try:
-                    up_r = requests.post(
-                        upload_url,
-                        data=payload,
-                        proxies=proxies,
-                        timeout=max(timeout, speed_duration + 5),
-                        headers={"User-Agent": APP_HEADER, "Content-Type": "application/octet-stream"},
-                    )
-                    if payload.transfer_start is not None and payload.transfer_end is not None:
-                        up_elapsed = payload.transfer_end - payload.transfer_start
+                    burst_speeds: List[float] = []
+                    total_downloaded = 0
+                    total_duration = 0.0
+                    burst_url = speed_url_template.format(bytes=target_bytes)
+
+                    start_all_bursts = time.perf_counter()
+                    burst_deadline = start_all_bursts + speed_duration if speed_duration > 0 else start_all_bursts + timeout
+
+                    for burst_idx in range(num_bursts):
+                        if time.perf_counter() >= burst_deadline - 0.2 and burst_speeds:
+                            break
+                        try:
+                            req_start = time.perf_counter()
+                            with session.get(
+                                burst_url,
+                                timeout=timeout,
+                                stream=True,
+                                headers={"User-Agent": APP_HEADER},
+                            ) as r:
+                                if out.ttfb_ms is None:
+                                    out.ttfb_ms = round((time.perf_counter() - req_start) * 1000.0, 1)
+
+                                if not (200 <= r.status_code < 400):
+                                    if not out.speed_error:
+                                        out.speed_error = f"HTTP {r.status_code}"
+                                    continue
+
+                                burst_downloaded = 0
+                                transfer_start = time.perf_counter()
+                                run_deadline = transfer_start + per_burst_duration
+
+                                for chunk in r.iter_content(chunk_size=32 * 1024):
+                                    if not chunk:
+                                        break
+                                    burst_downloaded += len(chunk)
+                                    if time.perf_counter() >= run_deadline or time.perf_counter() >= burst_deadline:
+                                        break
+
+                                transfer_elapsed = time.perf_counter() - transfer_start
+                                if transfer_elapsed > 0.04 and burst_downloaded > 0:
+                                    b_mbps = (burst_downloaded * 8) / (transfer_elapsed * 1_000_000)
+                                    burst_speeds.append(b_mbps)
+                                    total_downloaded += burst_downloaded
+                                    total_duration += transfer_elapsed
+                        except Exception as b_exc:
+                            logger.debug("Download burst %d failed for %s: %s", burst_idx + 1, out.endpoint, b_exc)
+
+                    if burst_speeds:
+                        out.speed_mbps = round(float(statistics.median(burst_speeds)), 2)
+                        out.download_bytes = total_downloaded
+                        out.download_duration = round(total_duration, 3)
+                        out.speed_error = ""
+                    elif not out.speed_error:
+                        out.speed_error = "Insufficient data received"
+
+                # 2. Upload Speed Test (Adaptive Payload & Precise Transfer Timing)
+                if test_upload and upload_bytes > 0:
+                    # Adapt upload payload size according to preliminary downlink bandwidth to prevent timeouts
+                    # on asymmetric ADSL/LTE uplinks (e.g. 0.1 - 2 Mbps)
+                    target_up_bytes = upload_bytes
+                    if preliminary_mbps is not None:
+                        if preliminary_mbps < 5.0:
+                            target_up_bytes = min(upload_bytes, 100_000)
+                        elif preliminary_mbps < 25.0:
+                            target_up_bytes = min(upload_bytes, 250_000)
+                        elif preliminary_mbps < 80.0:
+                            target_up_bytes = min(upload_bytes, 500_000)
                     else:
-                        up_elapsed = 0.0
+                        target_up_bytes = min(upload_bytes, 250_000)
 
-                    if 200 <= up_r.status_code < 400 and up_elapsed > 0.02 and payload.bytes_sent > 0:
-                        up_mbps = (payload.bytes_sent * 8) / (up_elapsed * 1_000_000)
-                        out.upload_mbps = round(up_mbps, 2)
-                        out.upload_bytes = payload.bytes_sent
-                        out.upload_duration = round(up_elapsed, 3)
-                    else:
-                        out.upload_error = f"HTTP {up_r.status_code}"
-                except Exception as exc:
-                    logger.debug("Upload test failed for %s: %s", out.endpoint, exc)
-                    out.upload_error = str(exc).split("\n", 1)[0][:100]
+                    up_timeout = max(float(timeout), float(speed_duration) + 5.0, 15.0)
+                    payload_data = b"0" * target_up_bytes
+
+                    try:
+                        up_start = time.perf_counter()
+                        up_r = session.post(
+                            upload_url,
+                            data=payload_data,
+                            timeout=up_timeout,
+                            headers={"User-Agent": APP_HEADER, "Content-Type": "application/octet-stream"},
+                        )
+                        up_elapsed = time.perf_counter() - up_start
+                        if 200 <= up_r.status_code < 400 and up_elapsed > 0.02 and len(payload_data) > 0:
+                            up_mbps = (len(payload_data) * 8) / (up_elapsed * 1_000_000)
+                            out.upload_mbps = round(up_mbps, 2)
+                            out.upload_bytes = len(payload_data)
+                            out.upload_duration = round(up_elapsed, 3)
+                            out.upload_error = ""
+                        else:
+                            out.upload_error = f"HTTP {up_r.status_code}"
+                    except Exception as exc:
+                        # Fallback for ultra-constrained links: retry with a small 50 KB probe if timed out
+                        if target_up_bytes > 50_000 and "timed out" in str(exc).lower():
+                            try:
+                                fb_data = b"0" * 50_000
+                                fb_start = time.perf_counter()
+                                fb_r = session.post(
+                                    upload_url,
+                                    data=fb_data,
+                                    timeout=min(up_timeout, 8.0),
+                                    headers={"User-Agent": APP_HEADER, "Content-Type": "application/octet-stream"},
+                                )
+                                fb_elapsed = time.perf_counter() - fb_start
+                                if 200 <= fb_r.status_code < 400 and fb_elapsed > 0.02:
+                                    fb_mbps = (len(fb_data) * 8) / (fb_elapsed * 1_000_000)
+                                    out.upload_mbps = round(fb_mbps, 2)
+                                    out.upload_bytes = len(fb_data)
+                                    out.upload_duration = round(fb_elapsed, 3)
+                                    out.upload_error = ""
+                            except Exception as fb_exc:
+                                logger.debug("Upload fallback failed for %s: %s", out.endpoint, fb_exc)
+                                out.upload_error = str(exc).split("\n", 1)[0][:100]
+                        else:
+                            logger.debug("Upload test failed for %s: %s", out.endpoint, exc)
+                            out.upload_error = str(exc).split("\n", 1)[0][:100]
 
     except Exception as exc:
         logger.debug("Speed test failed for %s: %s", out.endpoint, exc)

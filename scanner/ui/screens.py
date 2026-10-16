@@ -434,7 +434,7 @@ def show_final_results(
             filter_line = f"\nFiltered out: [bold yellow]{filtered_out}[/bold yellow]"
         console.print(Panel(f"[bold green]Scan Finished[/bold green]\n\nWorking Endpoints: [bold green]{len(ok)}[/bold green]\nFailed Endpoints: [bold red]{failed}[/bold red]{filter_line}", border_style="green", expand=False))
         title_txt = f"Best Results (Showing {min(len(ok), display_limit)} of {len(ok)})" if len(ok) > display_limit else "Best Results"
-        table = Table(title=title_txt, box=box.ROUNDED, border_style="cyan", expand=False)
+        table = Table(title=title_txt, box=box.ROUNDED, border_style="cyan", expand=False, pad_edge=False)
         if len(ok) > display_limit:
             table.caption = f"[dim]Showing top {display_limit} of {len(ok)} endpoints. Full results saved to {txt_path.name}[/dim]"
         table.add_column("#", justify="right", style="dim", no_wrap=True)
@@ -448,13 +448,13 @@ def show_final_results(
             table.add_column("Down", justify="right", style="yellow", no_wrap=True)
             if has_upload:
                 table.add_column("Up", justify="right", style="bright_magenta", no_wrap=True)
-            table.add_column("Latency", justify="right", style="green", no_wrap=True)
+            table.add_column("Ping", justify="right", style="green", no_wrap=True)
             table.add_column("Jitter", justify="right", style="cyan", no_wrap=True)
             table.add_column("Loss", justify="right", style="magenta", no_wrap=True)
             if has_longevity:
-                table.add_column("AntiDrop", justify="center", no_wrap=True)
+                table.add_column("Drop", justify="center", no_wrap=True)
             table.add_column("Pass", justify="right", no_wrap=True)
-            table.add_column("HTTP", justify="right", no_wrap=True)
+            table.add_column("HTTP", justify="right", no_wrap=True, min_width=4)
             for i, r in enumerate(display_items, 1):
                 down = f"{r.speed_mbps:.1f}M" if r.speed_mbps is not None else "-"
                 up = f"{r.upload_mbps:.1f}M" if r.upload_mbps is not None else "-"
@@ -481,10 +481,10 @@ def show_final_results(
                 row.extend([recheck, str(r.status_code or "")])
                 table.add_row(*row)
         elif is_longevity:
-            table.add_column("AntiDrop", justify="center", no_wrap=True)
+            table.add_column("Drop", justify="center", no_wrap=True)
             table.add_column("DPI Loss", justify="right", style="magenta", no_wrap=True)
-            table.add_column("Latency", justify="right", style="green", no_wrap=True)
-            table.add_column("HTTP", justify="right", no_wrap=True)
+            table.add_column("Ping", justify="right", style="green", no_wrap=True)
+            table.add_column("HTTP", justify="right", no_wrap=True, min_width=4)
             for i, r in enumerate(display_items, 1):
                 drop_badge = "[green]Pass[/green]" if r.sustained else "[red]Drop[/red]"
                 loss = f"{r.longevity_loss:.0f}%" if r.longevity_loss is not None else "-"
@@ -515,13 +515,13 @@ def show_final_results(
                 row.append(str(r.download_bytes or "-"))
                 table.add_row(*row)
         elif is_recheck:
-            table.add_column("Latency", justify="right", style="green", no_wrap=True)
+            table.add_column("Ping", justify="right", style="green", no_wrap=True)
             table.add_column("Jitter", justify="right", style="cyan", no_wrap=True)
             table.add_column("Loss", justify="right", style="magenta", no_wrap=True)
             if has_longevity:
-                table.add_column("AntiDrop", justify="center", no_wrap=True)
+                table.add_column("Drop", justify="center", no_wrap=True)
             table.add_column("Pass", justify="right", no_wrap=True)
-            table.add_column("HTTP", justify="right", no_wrap=True)
+            table.add_column("HTTP", justify="right", no_wrap=True, min_width=4)
             for i, r in enumerate(display_items, 1):
                 latency = f"{r.latency_ms:.0f}ms" if r.latency_ms is not None else "-"
                 jitter = f"{r.jitter_ms:.0f}ms" if r.jitter_ms is not None else "-"
@@ -543,8 +543,8 @@ def show_final_results(
                 row.extend([recheck, str(r.status_code or "")])
                 table.add_row(*row)
         else:
-            table.add_column("Latency", justify="right", style="green", no_wrap=True)
-            table.add_column("HTTP", justify="right", no_wrap=True)
+            table.add_column("Ping", justify="right", style="green", no_wrap=True)
+            table.add_column("HTTP", justify="right", no_wrap=True, min_width=4)
             for i, r in enumerate(display_items, 1):
                 latency = f"{r.latency_ms:.0f}ms" if r.latency_ms is not None else "-"
                 row = [str(i), r.ip, str(r.port)]

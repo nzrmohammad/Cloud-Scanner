@@ -42,6 +42,7 @@ from scanner.ui.terminal import (
     render_fixed_header,
     render_stage,
     show_banner,
+    tcp_prefilter_reporter,
     tui_screen,
 )
 
@@ -52,6 +53,7 @@ __all__ = [
     "clear_screen",
     "tui_screen",
     "progress_reporter",
+    "tcp_prefilter_reporter",
     "render_fixed_header",
     "show_banner",
     "render_stage",

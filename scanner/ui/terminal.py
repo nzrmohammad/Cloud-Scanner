@@ -342,3 +342,32 @@ def progress_reporter(stage_title: str, total: int, mode: str = "latency") -> Ge
         yield _fallback_cb
         print()
 
+
+@contextmanager
+def tcp_prefilter_reporter(total: int) -> Generator[Callable[[int, int, int], None], None, None]:
+    """Context manager yielding a decoupled progress callback for TCP Pre-filter."""
+    if RICH and console is not None and Progress is not None and total > 0:
+        progress = Progress(
+            SpinnerColumn("line", style="bold cyan"),
+            TextColumn("[bold cyan]{task.description}"),
+            BarColumn(),
+            TextColumn("{task.completed}/{task.total}"),
+            TextColumn("[bold green]({task.fields[alive]} alive)[/bold green]"),
+            TimeElapsedColumn(),
+            console=console,
+            refresh_per_second=10,
+        )
+        with progress:
+            task = progress.add_task("TCP Handshake", total=total, alive=0)
+
+            def _rich_cb(done: int, total_items: int, alive_count: int) -> None:
+                progress.update(task, completed=done, alive=alive_count)
+
+            yield _rich_cb
+    else:
+        def _fallback_cb(done: int, total_items: int, alive_count: int) -> None:
+            print(f"TCP Handshake: {done}/{total_items} ({alive_count} alive)", end="\r")
+
+        yield _fallback_cb
+        print()
+

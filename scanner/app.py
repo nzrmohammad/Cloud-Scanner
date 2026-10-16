@@ -3,6 +3,7 @@ import sys
 from pathlib import Path
 from typing import List, Optional
 
+from scanner.analytics import get_smart_recommendations
 from scanner.config import ConfigManager, load_saved_vless_config, parse_vless, save_vless_config
 from scanner.constants import (
     APP_HEADER,
@@ -30,7 +31,7 @@ from scanner.models import (
     ScanResult,
     VlessConfig,
 )
-from scanner.storage import save_results
+from scanner.storage import save_results, save_scan_summary_report
 from scanner.targets import expand_targets, print_isp_catalog_cli, resolve_isp_files
 from scanner.ui import (
     cprint,
@@ -44,6 +45,7 @@ from scanner.ui import (
     render_welcome_config_screen,
     select_targets_tui,
     show_final_results,
+    tcp_prefilter_reporter,
     tui_screen,
 )
 from scanner.xray import find_xray
@@ -218,22 +220,24 @@ class CloudScannerApp:
                         break
 
                     try:
-                        results = run_scan(
-                            v,
-                            targets,
-                            ports,
-                            xray,
-                            settings.workers,
-                            settings.timeout,
-                            1,
-                            settings.test_url,
-                            "warning",
-                            use_tcp_prefilter=settings.tcp_prefilter,
-                            output_dir=output_dir,
-                            on_stage=render_stage,
-                            on_message=cprint,
-                            make_reporter=progress_reporter,
-                        )
+                        with tcp_prefilter_reporter(total_endpoints) as tcp_cb:
+                            results = run_scan(
+                                v,
+                                targets,
+                                ports,
+                                xray,
+                                settings.workers,
+                                settings.timeout,
+                                1,
+                                settings.test_url,
+                                "warning",
+                                use_tcp_prefilter=settings.tcp_prefilter,
+                                output_dir=output_dir,
+                                on_stage=render_stage,
+                                on_message=cprint,
+                                make_reporter=progress_reporter,
+                                on_prefilter_progress=tcp_cb,
+                            )
                         txt, csvp = save_results(results, output_dir, "clean_ips", vless_config=v)
                         render_stage("Scan Results", "Latency scan finished. Results are saved below.", "green")
                     except ScanInterrupted as interrupted:
@@ -252,6 +256,8 @@ class CloudScannerApp:
                     final_txt, final_csv = txt, csvp
 
                     if working_results:
+                        cprint(f"\n[bold green]Success![/bold green] Found [bold cyan]{len(working_results)}[/bold cyan] responsive clean IP(s).")
+                        prompt_continue_nav("Press Enter to continue to Quality & Speed Testing", allow_back=False)
                         final_results, final_txt, final_csv, prefix = handle_post_scan_testing_tui(
                             v,
                             working_results,
@@ -263,6 +269,17 @@ class CloudScannerApp:
                         )
                         render_stage("Final Results", "Testing complete. Summary of best results below.", "green")
                         show_final_results(final_results, final_txt, final_csv, filename_prefix=prefix, vless_config=v)
+
+                    recs = get_smart_recommendations(final_results, v) if final_results else []
+                    save_scan_summary_report(
+                        final_results,
+                        output_dir,
+                        vless_config=v,
+                        settings=settings,
+                        total_targets_count=total_endpoints,
+                        tcp_alive_count=len(working_results),
+                        recommendations=recs,
+                    )
 
                     self.last_results = final_results
                     self.last_txt = final_txt
@@ -332,22 +349,25 @@ class CloudScannerApp:
             return 2
 
         try:
-            results = run_scan(
-                v,
-                targets,
-                ports,
-                xray,
-                args.concurrency,
-                args.timeout,
-                args.tries,
-                args.url,
-                args.loglevel,
-                use_tcp_prefilter=use_tcp_prefilter,
-                output_dir=Path(args.output_dir),
-                on_stage=render_stage,
-                on_message=cprint,
-                make_reporter=progress_reporter,
-            )
+            total_prefilter = len(targets) * len(ports)
+            with tcp_prefilter_reporter(total_prefilter) as tcp_cb:
+                results = run_scan(
+                    v,
+                    targets,
+                    ports,
+                    xray,
+                    args.concurrency,
+                    args.timeout,
+                    args.tries,
+                    args.url,
+                    args.loglevel,
+                    use_tcp_prefilter=use_tcp_prefilter,
+                    output_dir=Path(args.output_dir),
+                    on_stage=render_stage,
+                    on_message=cprint,
+                    make_reporter=progress_reporter,
+                    on_prefilter_progress=tcp_cb,
+                )
             txt, csvp = save_results(results, Path(args.output_dir), "clean_ips", vless_config=v)
         except ScanInterrupted as interrupted:
             results = interrupted.results
@@ -448,6 +468,13 @@ class CloudScannerApp:
                     filename_prefix="clean_ips_speed_filtered",
                     vless_config=v,
                 )
+        if final_results:
+            save_scan_summary_report(
+                final_results,
+                Path(args.output_dir),
+                vless_config=v,
+                total_targets_count=len(targets) * len(ports),
+            )
         return 0
 
     def run(self) -> int:

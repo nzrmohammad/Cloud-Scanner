@@ -1,7 +1,7 @@
 # 🌐 Cloud Scanner
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Python-3.9%2B-blue.svg?style=for-the-badge&logo=python&logoColor=white" alt="Python 3.9+" />
+  <img src="https://img.shields.io/badge/Python-3.10%2B-blue.svg?style=for-the-badge&logo=python&logoColor=white" alt="Python 3.10+" />
   <img src="https://img.shields.io/badge/Architecture-Modular%20OOP-success.svg?style=for-the-badge" alt="Modular OOP" />
   <img src="https://img.shields.io/badge/Platform-Windows%20%7C%20Linux%20%7C%20macOS-informational.svg?style=for-the-badge" alt="Platform" />
   <img src="https://img.shields.io/badge/Core-Xray--core-orange.svg?style=for-the-badge" alt="Xray Core" />
@@ -55,13 +55,13 @@
 When scanning finishes, endpoints are enriched with both physical host location (`IP Loc`) and Cloudflare edge data center (`Colo`):
 
 ```text
-┌───┬──────────────┬──────┬─────────────┬──────────┬──────┬─────────┬────────┬──────┬──────────┬──────┬──────┐
-│ # │ IP           │ Port │   IP Loc    │   Colo   │ Down │ Latency │ Jitter │ Loss │ AntiDrop │ Pass │ HTTP │
-├───┼──────────────┼──────┼─────────────┼──────────┼──────┼─────────┼────────┼──────┼──────────┼──────┼──────┤
-│ 1 │ 62.60.195.74 │ 2087 │ [IR] Tehran │ [NL] AMS │ 7.1M │  1096ms │   43ms │   0% │   Pass   │  5/5 │  204 │
-│ 2 │ 46.38.148.65 │ 2087 │ [IR] Tehran │ [NL] AMS │ 9.9M │  1170ms │   67ms │   0% │   Pass   │  5/5 │  204 │
-│ 3 │ 104.16.1.1   │  443 │ [US] Anycast│ [TR] IST │  25M │    42ms │    5ms │   0% │   Pass   │  5/5 │  200 │
-└───┴──────────────┴──────┴─────────────┴──────────┴──────┴─────────┴────────┴──────┴──────────┴──────┴──────┘
+┌───┬──────────────┬──────┬─────────────┬──────────┬──────┬──────┬────────┬────────┬──────┬──────┬──────┬──────┐
+│ # │ IP           │ Port │   IP Loc    │   Colo   │ Down │  Up  │  Ping  │ Jitter │ Loss │ Drop │ Pass │ HTTP │
+├───┼──────────────┼──────┼─────────────┼──────────┼──────┼──────┼────────┼────────┼──────┼──────┼──────┼──────┤
+│ 1 │ 62.60.195.74 │ 2087 │ [IR] Tehran │ [NL] AMS │ 7.1M │ 1.2M │ 1096ms │   43ms │   0% │ Pass │  5/5 │  204 │
+│ 2 │ 46.38.148.65 │ 2087 │ [IR] Tehran │ [NL] AMS │ 9.9M │ 2.4M │ 1170ms │   67ms │   0% │ Pass │  5/5 │  204 │
+│ 3 │ 104.16.1.1   │  443 │ [US] Anycast│ [TR] IST │  25M │ 8.5M │   42ms │    5ms │   0% │ Pass │  5/5 │  200 │
+└───┴──────────────┴──────┴─────────────┴──────────┴──────┴──────┴────────┴────────┴──────┴──────┴──────┴──────┘
 ```
 
 Smart recommendations are categorized and saved with ready-to-import VLESS links:
@@ -143,7 +143,7 @@ Cloud_Scanner/
 
 ## 📦 Prerequisites & Installation
 
-1. **Python 3.9 or newer**: Ensure `python` is added to your system `PATH`.
+1. **Python 3.10 or newer**: Ensure `python` is added to your system `PATH`.
 2. **Install Python dependencies**:
    ```bash
    pip install -r requirements.txt
@@ -236,14 +236,53 @@ Fine-tuning speed test parameters in `config.txt` depends directly on your conne
 
 ## 📁 Output Formats
 
-Results are saved to the `results/` folder:
-- **`clean_ips.csv`**: Comprehensive CSV reports with dedicated columns: `ip`, `port`, `ip_country`, `ip_city`, `ip_org`, `ip_location`, `download_mbps`, `upload_mbps`, `avg_latency_ms`, `jitter_ms`, `packet_loss_pct`, `anti_drop_sustained`, `colo_code`, `colo_location`.
-- **`clean_ips.txt`**: Clean text format listing working endpoints with physical location and edge PoP:
-  `62.60.195.74:2087 | down: 7.10 Mbps | latency: 1096.0 ms | loc: [IR] Tehran | colo: [NL] AMS (Amsterdam) | HTTP 204`
-- **`clean_ips_vless.txt`**: Ready-to-import `vless://` links formatted with location-aware remarks:
-  `vless://...?host=...#MyRemark-62.60.195.74:2087-IR_AMS_7.1M_AntiDrop`
-- **`recommended_configs.txt`**: Curated configurations recommended specifically for Anti-Drop, Gaming, Streaming, and Browsing.
-- **`by_port/`**: Separate result files grouped by port (e.g. `clean_ips_port_443.txt`, `clean_ips_port_2087.txt`).
+All results, benchmarks, and configuration links are saved to the `results/` folder:
+
+| File / Folder | Type | Description |
+| :--- | :---: | :--- |
+| **`scan_summary_report.txt`** | 📋 Summary | **Comprehensive All-In-One Report**: Human-readable diagnostic breakdown covering run metrics, candidate funnel stats (Target Candidates → TCP Alive → Working Xray), smart recommendations, and an aligned benchmark table with Latency, Jitter, Loss, Anti-Drop, Download/Upload speeds, and Cloudflare edge Colo. |
+| **`recommended_configs.txt`** | 🔗 Links | **Curated Ready-to-Use VLESS Links**: Hand-picked configurations categorized for Gaming (lowest jitter/loss), Streaming (max bandwidth), Anti-Drop (100% steady continuous stream), and Balanced usage. |
+| **`clean_ips_full_tested.txt`** | 📄 Text | **Deeply Benchmarked IP List**: Endpoints that successfully completed all post-scan stages (multi-ping stability, 30s DPI endurance, and speed benchmarks) with detailed metrics appended to each line. |
+| **`clean_ips_full_tested_vless.txt`** | 🔗 Links | **Full-Tested VLESS Links**: Ready-to-import `vless://` URLs for all deeply tested endpoints, enriched with remark metrics (`#Remark-104.16.1.1:443-AMS_DL45M_UL12M_Ping42ms`). |
+| **`clean_ips.txt`** | 📄 Text | **Initial Stage Working Endpoints**: Endpoints that passed the preliminary single-ping Xray TLS handshake. |
+| **`clean_ips_vless.txt`** | 🔗 Links | **Initial Stage VLESS Links**: Ready-to-import `vless://` URLs generated from the initial latency scan with location tags. |
+| **`clean_ips.csv`** | 📊 CSV | **Structured Dataset**: Full CSV report with dedicated columns (`ip`, `port`, `ip_country`, `ip_city`, `ip_org`, `ip_location`, `download_mbps`, `upload_mbps`, `avg_latency_ms`, `jitter_ms`, `packet_loss_pct`, `anti_drop_sustained`, `colo_code`, `colo_location`) for Excel, Google Sheets, or data pipelines. |
+| **`tcp_alive_with_port.txt`** | 🔌 Socket | **TCP Pre-Filter Endpoints (`IP:Port`)**: Raw sockets that passed the high-concurrency non-blocking TCP handshake filter. |
+| **`tcp_alive_ips.txt`** | 🌐 IP List | **TCP Pre-Filter Pure IPs**: Deduplicated list of clean IP addresses (without ports) that passed the TCP handshake. |
+| **`by_port/`** | 📁 Directory | **Per-Port Output Directory**: Individual text files grouping working endpoints by specific port (e.g. `clean_ips_port_443.txt`, `clean_ips_port_8443.txt`, `clean_ips_port_2087.txt`). |
+
+### Example Output Preview:
+
+#### 1. Full-Tested Endpoints (`clean_ips_full_tested.txt`)
+```text
+# Cloud Scanner v0.3.0 - Full Tested Clean Endpoints
+# Generated: 2026-10-16 18:00:00
+104.16.1.1:443 | down: 45.20 Mbps | up: 12.30 Mbps | latency: 42.0 ms | jitter: 4.1 ms | loss: 0% | anti-drop: Pass | loc: [US] Anycast | colo: [TR] IST (Istanbul)
+46.38.148.65:2087 | down: 9.90 Mbps | up: 3.20 Mbps | latency: 117.0 ms | jitter: 8.5 ms | loss: 0% | anti-drop: Pass | loc: [IR] Tehran | colo: [NL] AMS (Amsterdam)
+```
+
+#### 2. Comprehensive Scan Summary (`scan_summary_report.txt`)
+```text
+================================================================================
+  CLOUD SCANNER 0.3.0 - COMPREHENSIVE SCAN SUMMARY REPORT
+  Generated at: 2026-10-16 18:00:00  |  Telegram: @Nzrmohammad
+================================================================================
+
+1. CONFIGURATION & RUN METRICS
+--------------------------------------------------------------------------------
+  VLESS Remark : FastServer
+  Target Server: my-subdomain.workers.dev:443
+  Protocol     : ws | Security: tls
+
+2. FUNNEL & HEALTH OVERVIEW
+--------------------------------------------------------------------------------
+  * Total Candidate Endpoints: 1524
+  * TCP Pre-Filter Alive     : 68 (4.46% reachable)
+  * Working Xray Proxies     : 60 (88.24% of alive)
+  * Stage 3: Stability & Jitter recheck: 60 endpoints passed
+  * Stage 4: Anti-Drop (DPI Endurance) : 58/60 sustained steady flow
+  * Stage 5: Speed Benchmarks          : 30 tested (Top DL: 48.50 Mbps | Top UL: 14.20 Mbps)
+```
 
 ---
 

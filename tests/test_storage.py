@@ -3,7 +3,11 @@ import tempfile
 from pathlib import Path
 
 from scanner.models import ScanResult, SmartRecommendation, VlessConfig
-from scanner.storage import save_recommended_configs, save_results
+from scanner.storage import (
+    save_recommended_configs,
+    save_results,
+    save_scan_summary_report,
+)
 
 
 def test_save_results_initial_scan():
@@ -158,3 +162,45 @@ def test_save_recommendations():
         assert "Balanced (Fast & Stable)" in content
         assert "104.16.1.1:443" in content
         assert "vless://test-link#Balanced" in content
+
+
+def test_save_scan_summary_report():
+    with tempfile.TemporaryDirectory() as td:
+        out_dir = Path(td)
+        v = VlessConfig(uuid="test-uuid", host="example.com", port=443, remark="TestServer")
+        r1 = ScanResult(
+            ip="104.16.1.1",
+            port=443,
+            ok=True,
+            latency_ms=45.0,
+            jitter_ms=2.1,
+            sustained=True,
+            speed_mbps=85.5,
+            upload_mbps=22.3,
+            colo="FRA",
+        )
+        r2 = ScanResult(
+            ip="104.16.1.2",
+            port=8443,
+            ok=False,
+            error="Connection refused",
+        )
+
+        report = save_scan_summary_report(
+            [r1, r2],
+            out_dir,
+            vless_config=v,
+            total_targets_count=100,
+            tcp_alive_count=10,
+        )
+
+        assert report.exists()
+        assert report.name == "scan_summary_report.txt"
+        text = report.read_text(encoding="utf-8")
+        assert "TestServer" in text
+        assert "example.com:443" in text
+        assert "104.16.1.1:443" in text
+        assert "85.50 Mbps" in text
+        assert "22.30 Mbps" in text
+        assert "FRA" in text
+

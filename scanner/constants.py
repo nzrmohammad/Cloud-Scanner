@@ -3,7 +3,7 @@ from pathlib import Path
 from typing import Optional
 
 APP_NAME = "Cloud Scanner"
-APP_VERSION = "v0.2.0"
+APP_VERSION = "v0.3.0"
 APP_CHANNEL = "@Nzrmohammad"
 APP_URL = "https://t.me/Nzrmohammad"
 APP_HEADER = f"{APP_NAME} {APP_VERSION} | {APP_CHANNEL}"

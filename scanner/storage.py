@@ -5,10 +5,10 @@ from typing import List, Optional, Tuple
 
 from scanner.analytics import apply_result_filters, output_sort_key
 from scanner.config import make_vless_link
-from scanner.constants import format_cf_colo
+from scanner.constants import APP_CHANNEL, APP_VERSION, format_cf_colo
 from scanner.geoip import format_ip_location
 from scanner.logger import get_logger
-from scanner.models import ScanResult, SmartRecommendation, VlessConfig
+from scanner.models import AppSettings, ScanResult, SmartRecommendation, VlessConfig
 
 logger = get_logger("storage")
 
@@ -50,6 +50,17 @@ def save_results(
         if min_speed_mbps > 0:
             lines.append(f"Min speed filter: {min_speed_mbps} Mbps")
     else:
+        if is_full:
+            lines.append(f"# Cloud Scanner {APP_VERSION} - Fully Tested Endpoints ({len(ok)} items) | {now}")
+            lines.append("# Evaluated: Stability (Loss/Jitter) + Anti-Drop (30s DPI stream) + Download & Upload speed")
+        elif is_speed:
+            lines.append(f"# Cloud Scanner {APP_VERSION} - Bandwidth Benchmarked Endpoints ({len(ok)} items) | {now}")
+        elif is_longevity:
+            lines.append(f"# Cloud Scanner {APP_VERSION} - Anti-Drop (DPI Endurance) Endpoints ({len(ok)} items) | {now}")
+        elif is_recheck:
+            lines.append(f"# Cloud Scanner {APP_VERSION} - Stability & Jitter Rechecked Endpoints ({len(ok)} items) | {now}")
+        else:
+            lines.append(f"# Cloud Scanner {APP_VERSION} - Initial Latency Scan Clean Endpoints ({len(ok)} items) | {now}")
         for r in ok:
             latency = f"{r.latency_ms:.1f} ms" if r.latency_ms is not None else "-"
             down = f"{r.speed_mbps:.2f} Mbps" if r.speed_mbps is not None else "-"
@@ -383,6 +394,129 @@ def save_recommended_configs(
         return None
 
 
+def save_scan_summary_report(
+    results: List[ScanResult],
+    output_dir: Path,
+    vless_config: Optional[VlessConfig] = None,
+    settings: Optional[AppSettings] = None,
+    total_targets_count: int = 0,
+    tcp_alive_count: int = 0,
+    recommendations: Optional[List[SmartRecommendation]] = None,
+) -> Path:
+    """Generate and persist a single, comprehensive scan summary report of all testing stages."""
+    output_dir.mkdir(parents=True, exist_ok=True)
+    report_file = output_dir / "scan_summary_report.txt"
+
+    ok = [r for r in results if r.ok]
+    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    sep = "=" * 80
+    sub_sep = "-" * 80
+
+    lines = [
+        sep,
+        f"  CLOUD SCANNER {APP_VERSION} - COMPREHENSIVE SCAN SUMMARY REPORT",
+        f"  Generated at: {now_str}  |  Telegram: {APP_CHANNEL}",
+        sep,
+        "",
+        "1. CONFIGURATION & RUN METRICS",
+        sub_sep,
+    ]
+
+    if vless_config:
+        lines.append(f"  VLESS Remark : {vless_config.remark or '(None)'}")
+        lines.append(f"  Target Server: {vless_config.host}:{vless_config.port}")
+        lines.append(f"  UUID / User  : {vless_config.uuid}")
+        proto = vless_config.query.get("type") or vless_config.query.get("network") or "tcp"
+        sec = vless_config.query.get("security") or "tls"
+        sni = vless_config.query.get("sni") or vless_config.host
+        lines.append(f"  Transport    : {proto} over {sec} (SNI: {sni})")
+
+    if settings:
+        ports_str = ", ".join(str(p) for p in (settings.ports or [vless_config.port if vless_config else 443]))
+        lines.append(f"  Ports Scanned: {ports_str}")
+        lines.append(f"  Workers      : {settings.workers} scan / {settings.speed_workers} benchmark")
+        lines.append(f"  Timeout      : {settings.timeout}s")
+        lines.append(f"  Post-Scan    : {settings.post_scan_mode.upper()}")
+
+    lines.extend([
+        "",
+        "2. STAGE-BY-STAGE FUNNEL STATISTICS",
+        sub_sep,
+        f"  * Total candidate targets expanded   : {total_targets_count}",
+        f"  * Stage 1: Fast TCP Pre-filter alive : {tcp_alive_count} (saved to tcp_alive_with_port.txt)",
+        f"  * Stage 2: Initial Xray scan working : {len(ok)} endpoints (saved to clean_ips.txt)",
+    ])
+
+    has_recheck = any(r.jitter_ms is not None for r in ok)
+    has_longevity = any(r.sustained is not None for r in ok)
+    has_speed = any(r.speed_mbps is not None for r in ok)
+
+    if has_recheck:
+        recheck_pass = sum(1 for r in ok if r.recheck_passed and r.recheck_passed > 0)
+        lines.append(f"  * Stage 3: Stability & Jitter recheck: {recheck_pass} endpoints passed")
+    if has_longevity:
+        sustain_count = sum(1 for r in ok if r.sustained is True)
+        lines.append(f"  * Stage 4: Anti-Drop (DPI Endurance) : {sustain_count}/{len(ok)} sustained steady flow")
+    if has_speed:
+        speed_tested = [r for r in ok if r.speed_mbps is not None]
+        top_dl = max((r.speed_mbps for r in speed_tested if r.speed_mbps is not None), default=0.0)
+        top_ul = max((r.upload_mbps for r in speed_tested if r.upload_mbps is not None), default=0.0)
+        lines.append(f"  * Stage 5: Speed Benchmarks          : {len(speed_tested)} tested (Top DL: {top_dl:.2f} Mbps | Top UL: {top_ul:.2f} Mbps)")
+
+    if recommendations:
+        lines.extend([
+            "",
+            "3. SMART RECOMMENDATIONS",
+            sub_sep,
+        ])
+        for rec in recommendations:
+            colo_str = f" ({format_cf_colo(rec.result.colo)})" if rec.result.colo else ""
+            lines.append(f"  [{rec.category.upper()}] - {rec.icon}")
+            lines.append(f"    Endpoint : {rec.result.endpoint}{colo_str}")
+            lines.append(f"    Metrics  : {rec.reason}")
+            if rec.vless_link:
+                lines.append(f"    Link     : {rec.vless_link}")
+            lines.append("")
+
+    lines.extend([
+        "4. DETAILED ENDPOINT BENCHMARK TABLE",
+        sub_sep,
+        f"  {'#':<4} {'Endpoint':<26} {'Latency':<10} {'Jitter':<9} {'Loss%':<7} {'Anti-Drop':<11} {'Download':<12} {'Upload':<11} {'PoP (Colo)'}",
+        sub_sep,
+    ])
+
+    for i, r in enumerate(ok, 1):
+        lat = f"{r.latency_ms:.1f}ms" if r.latency_ms is not None else "-"
+        jit = f"{r.jitter_ms:.1f}ms" if r.jitter_ms is not None else "-"
+        loss = f"{r.packet_loss:.0f}%" if r.packet_loss is not None else "-"
+        ad = "HELD" if r.sustained is True else (f"DROP({r.longevity_loss:.0f}%)" if r.sustained is False else "-")
+        dl = f"{r.speed_mbps:.2f}M" if r.speed_mbps is not None else "-"
+        ul = f"{r.upload_mbps:.2f}M" if r.upload_mbps is not None else "-"
+        colo = format_cf_colo(r.colo) if r.colo else "-"
+        lines.append(f"  {i:<4} {r.endpoint:<26} {lat:<10} {jit:<9} {loss:<7} {ad:<11} {dl:<12} {ul:<11} {colo}")
+
+    lines.extend([
+        sub_sep,
+        "",
+        "5. OUTPUT FILES GUIDE",
+        sub_sep,
+        "  - scan_summary_report.txt        : Complete human-readable summary of all stages and statistics.",
+        "  - tcp_alive_with_port.txt        : Endpoints (IP:Port) responsive to initial TCP connection.",
+        "  - tcp_alive_ips.txt              : Unique IP addresses responsive to initial TCP connection.",
+        "  - clean_ips.txt / .csv           : All responsive endpoints from initial latency scan.",
+        "  - clean_ips_vless.txt            : VLESS links from initial latency scan.",
+        "  - clean_ips_full_tested.txt      : Top endpoints with full stability, anti-drop, and speed benchmarks.",
+        "  - clean_ips_full_tested_vless.txt: Configs customized with real speed and Anti-Drop metrics in remarks.",
+        "  - recommended_configs.txt        : Curated configurations categorized for Gaming, Streaming, etc.",
+        "  - by_port/                       : Results organized by individual port (when scanning multiple ports).",
+        sep,
+    ])
+
+    report_file.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return report_file
+
+
 class ResultExporter:
     """Class responsible for formatting and persisting scan results to disk."""
 
@@ -410,3 +544,23 @@ class ResultExporter:
 
     def export_recommendations(self, recs: List[SmartRecommendation]) -> Optional[Path]:
         return save_recommended_configs(recs, self.output_dir)
+
+    def export_summary_report(
+        self,
+        results: List[ScanResult],
+        vless_config: Optional[VlessConfig] = None,
+        settings: Optional[AppSettings] = None,
+        total_targets_count: int = 0,
+        tcp_alive_count: int = 0,
+        recommendations: Optional[List[SmartRecommendation]] = None,
+    ) -> Path:
+        return save_scan_summary_report(
+            results,
+            self.output_dir,
+            vless_config=vless_config,
+            settings=settings,
+            total_targets_count=total_targets_count,
+            tcp_alive_count=tcp_alive_count,
+            recommendations=recommendations,
+        )
+

@@ -6,7 +6,7 @@ from scanner.engine import ScannerEngine
 from scanner.models import AppSettings, ScanResult, VlessConfig
 from scanner.storage import ResultExporter
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 __author__ = "Mohammad"
 __channel__ = "@Nzrmohammad"
 
