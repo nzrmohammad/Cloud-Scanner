@@ -126,7 +126,12 @@ def save_results(
 
     lines: List[str] = []
     if not ok:
-        lines.append("No results matched the selected filters.")
+        has_filters = max_latency_ms > 0 or min_speed_mbps > 0
+        has_any_ok = any(r.ok for r in results)
+        if has_filters and has_any_ok:
+            lines.append("No results matched the selected filters.")
+        else:
+            lines.append("No working endpoints were found.")
         if max_latency_ms > 0:
             lines.append(f"Max latency filter: {max_latency_ms} ms")
         if min_speed_mbps > 0:

@@ -18,6 +18,7 @@ from scanner.constants import (
     format_cf_colo,
 )
 from scanner.geoip import format_ip_location
+from scanner.logger import get_logger
 from scanner.models import (
     AppSettings,
     NavigationBack,
@@ -74,6 +75,8 @@ try:
 except ImportError:
     requests = None  # type: ignore[assignment]
 
+logger = get_logger("ui.screens")
+
 
 def _format_settings_lines(fallback_port: int, settings: AppSettings) -> Tuple[str, str, str, str]:
     """Build shared formatted strings describing active AppSettings."""
@@ -110,7 +113,8 @@ def _run_xray_download_flow(target_dir: Path, tag: Optional[str] = None) -> bool
                             progress.update(task_id, completed=dl)
 
                     ok, msg = download_xray_release(target_dir, tag=tag, proxies=proxies, on_progress=_on_prog)
-            except Exception:
+            except Exception as exc:
+                logger.debug("Rich progress download UI fallback triggered: %s", exc)
                 ok, msg = download_xray_release(target_dir, tag=tag, proxies=proxies)
         else:
             ok, msg = download_xray_release(target_dir, tag=tag, proxies=proxies)

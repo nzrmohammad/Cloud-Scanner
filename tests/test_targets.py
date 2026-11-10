@@ -54,3 +54,9 @@ def test_expand_targets_short_range_and_ipv6_safe_cap():
     v6_count = sum(1 for x in mixed if ":" in x)
     assert v4_count >= 5
     assert v6_count >= 1
+
+
+def test_overlapping_ranges_merged_before_sampling():
+    sampled = expand_targets(["192.168.1.1-10", "192.168.1.5-15"], max_hosts=15, sample_if_too_many=True)
+    assert len(sampled) == 15
+    assert set(sampled) == {f"192.168.1.{i}" for i in range(1, 16)}

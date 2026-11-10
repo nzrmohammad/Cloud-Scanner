@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import random
 import socket
 import statistics
@@ -118,7 +119,7 @@ def _run_concurrent_tasks(
             fut.cancel()
         terminate_active_xray_processes()
         ex.shutdown(wait=False, cancel_futures=True)
-        partial = results if results else (list(prior_results) if prior_results else [])
+        partial = (list(prior_results) if prior_results else []) + results
         raise ScanInterrupted(partial, stage_name) from exc
     finally:
         ex.shutdown(wait=False, cancel_futures=True)
@@ -149,7 +150,11 @@ def fast_tcp_filter(
     if total == 0:
         return []
 
-    max_w = min(max(workers * 2, 60), total, 100)
+    # Cap concurrent TCP handshakes on Windows to avoid WSAENOBUFS / ephemeral port exhaustion
+    if os.name == "nt":
+        max_w = min(max(workers, 20), total, 30)
+    else:
+        max_w = min(max(workers * 2, 60), total, 100)
     alive: List[Tuple[str, int]] = []
     linger_bytes = struct.pack("ii", 1, 0)
 
@@ -172,8 +177,8 @@ def fast_tcp_filter(
                     # Reset cleanly on close to avoid TIME_WAIT socket exhaustion
                     try:
                         sock.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, linger_bytes)
-                    except OSError:
-                        pass
+                    except OSError as exc:
+                        logger.debug("SO_LINGER setup skipped for %s:%d: %s", ip, port, exc)
                     ok = True
                 except (asyncio.TimeoutError, OSError):
                     ok = False
@@ -181,8 +186,8 @@ def fast_tcp_filter(
                     if sock is not None:
                         try:
                             sock.close()
-                        except OSError:
-                            pass
+                        except OSError as exc:
+                            logger.debug("Closing TCP prefilter socket failed for %s:%d: %s", ip, port, exc)
 
             if ok:
                 alive.append(pair)
@@ -666,15 +671,15 @@ def retest_ip_latency(
                         # Reset pooled connection so the next probe uses a clean socket
                         try:
                             session.close()
-                        except Exception:
-                            pass
+                        except Exception as close_exc:
+                            logger.debug("Error resetting session for %s:%d: %s", ip, port, close_exc)
                         session = requests.Session()
                         session.proxies = xp.proxies
             finally:
                 try:
                     session.close()
-                except Exception:
-                    pass
+                except Exception as close_exc:
+                    logger.debug("Error closing session for %s:%d: %s", ip, port, close_exc)
     except Exception as exc:
         logger.debug("Failed to spawn Xray for retest of %s:%d: %s", ip, port, exc)
         for _ in range(sample_count):
@@ -788,8 +793,8 @@ def longevity_test_ip(
                                 aborted = True
                                 try:
                                     r.close()
-                                except Exception:
-                                    pass
+                                except Exception as close_exc:
+                                    logger.debug("Closing aborted stream failed for %s: %s", out.endpoint, close_exc)
                                 break
                             if chunk:
                                 total_bytes += len(chunk)
@@ -978,9 +983,8 @@ def run_latency_scan(
                 )
                 results.extend(chunk_res)
                 done += len(chunk_res)
-            except ScanInterrupted as interrupted:
-                combined = results + interrupted.results
-                raise ScanInterrupted(combined, "scan") from interrupted
+            except ScanInterrupted:
+                raise
 
     return results
 
@@ -1145,9 +1149,13 @@ def enrich_results_with_colo(
                 with DaemonThreadPoolExecutor(max_workers=min(workers, len(chunk))) as ex:
                     list(ex.map(_fetch, chunk))
         except Exception as exc:
-            logger.debug("BatchXrayProcess failed for chunk, falling back to individual resolution: %s", exc)
-            for r in chunk:
+            logger.debug("BatchXrayProcess failed for chunk, falling back to concurrent individual resolution: %s", exc)
+
+            def _resolve_single(r: ScanResult) -> None:
                 r.colo = resolve_endpoint_colo(v, r.ip, r.port, xray, timeout=timeout)
+
+            with DaemonThreadPoolExecutor(max_workers=min(workers, len(chunk))) as ex:
+                list(ex.map(_resolve_single, chunk))
 
 
 def run_stability_stage(

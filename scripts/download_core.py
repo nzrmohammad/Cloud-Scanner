@@ -12,6 +12,7 @@ import os
 import sys
 import tempfile
 from pathlib import Path
+from typing import Dict, Optional
 
 
 def app_root() -> Path:
@@ -105,14 +106,13 @@ def main() -> int:
     parser.add_argument("-d", "--dir", help="Destination core directory. Default: ./core")
     args = parser.parse_args()
 
-    proxies = None
+    proxies: Optional[Dict[str, str]] = None
     if args.proxy:
-        proxies = {"http": args.proxy, "https": args.proxy}
+        proxies = {"http": str(args.proxy), "https": str(args.proxy)}
     elif os.environ.get("HTTPS_PROXY") or os.environ.get("HTTP_PROXY"):
-        proxies = {
-            "http": os.environ.get("HTTP_PROXY") or os.environ.get("HTTPS_PROXY"),
-            "https": os.environ.get("HTTPS_PROXY") or os.environ.get("HTTP_PROXY"),
-        }
+        http_p = os.environ.get("HTTP_PROXY") or os.environ.get("HTTPS_PROXY") or ""
+        https_p = os.environ.get("HTTPS_PROXY") or http_p
+        proxies = {"http": http_p, "https": https_p}
 
     target_dir = Path(args.dir) if args.dir else (app_root() / "core")
     print(f"Target directory: {target_dir}")
@@ -130,7 +130,7 @@ def main() -> int:
         print(f"Failed to resolve latest Xray-core release tag: {e}")
         print("\nTip: If GitHub is slow or blocked in your network, pass a proxy: python scripts/download_core.py -p http://127.0.0.1:10808")
         return 2
-    if tag and not tag.startswith("v") and not tag[0].isdigit():
+    if tag and not tag.startswith("v"):
         tag = f"v{tag}"
     print(f"Target version: {tag}")
 

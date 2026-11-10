@@ -243,9 +243,30 @@ def _expand_sources_exact(sources: List[TargetSource], max_hosts: Optional[int] 
     return out
 
 
+def _merge_overlapping_sources(sources: List[TargetSource]) -> List[TargetSource]:
+    """Merge overlapping or adjacent TargetSources per (version, port) before sampling."""
+    grouped: Dict[Tuple[int, Optional[int]], List[TargetSource]] = {}
+    for src in sources:
+        if src.size > 0:
+            grouped.setdefault((src.version, src.port), []).append(src)
+
+    merged: List[TargetSource] = []
+    for (version, port), group in grouped.items():
+        group.sort(key=lambda s: (s.start, s.end))
+        cur_start, cur_end, cur_label = group[0].start, group[0].end, group[0].label
+        for nxt in group[1:]:
+            if nxt.start <= cur_end + 1:
+                cur_end = max(cur_end, nxt.end)
+            else:
+                merged.append(TargetSource(start=cur_start, end=cur_end, version=version, label=cur_label, port=port))
+                cur_start, cur_end, cur_label = nxt.start, nxt.end, nxt.label
+        merged.append(TargetSource(start=cur_start, end=cur_end, version=version, label=cur_label, port=port))
+    return merged
+
+
 def _sample_sources_evenly(sources: List[TargetSource], max_hosts: int) -> List[str]:
     """Sample targets evenly across all selected ranges without enumerating them."""
-    sources = [s for s in sources if s.size > 0]
+    sources = _merge_overlapping_sources(sources)
     if not sources or max_hosts <= 0:
         return []
     totals: Dict[int, int] = {}
@@ -373,7 +394,8 @@ def read_isp_stats(path: Path) -> Tuple[int, str]:
         valid = [x for x in valid if x]
         preview = ", ".join(valid[:2]) + (" ..." if len(valid) > 2 else "")
         return len(valid), preview
-    except Exception:
+    except Exception as exc:
+        logger.debug("Failed to read ISP file stats for %s: %s", path, exc)
         return 0, ""
 
 

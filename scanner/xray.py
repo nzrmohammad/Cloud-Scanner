@@ -56,8 +56,8 @@ def free_ports(count: int) -> List[int]:
         for s in sockets:
             try:
                 s.close()
-            except OSError:
-                pass
+            except OSError as exc:
+                logger.debug("Closing probe socket failed: %s", exc)
     return ports
 
 
@@ -66,13 +66,15 @@ def free_port() -> int:
     return free_ports(1)[0]
 
 
-def wait_ports(ports: List[int], timeout: float) -> bool:
-    """Wait until all local TCP ports in `ports` are accepting connections."""
+def wait_ports(ports: List[int], timeout: float, proc: Optional[subprocess.Popen] = None) -> bool:
+    """Wait until all local TCP ports in `ports` accept connections or process exits."""
     if not ports:
         return True
     deadline = time.monotonic() + timeout
     pending = list(ports)
     while pending and time.monotonic() < deadline:
+        if proc is not None and proc.poll() is not None:
+            return False
         remaining: List[int] = []
         for p in pending:
             try:
@@ -538,14 +540,32 @@ class _BaseXrayProcess:
             xray_dir = self.xray_path.parent
             env = os.environ.copy()
             env["XRAY_LOCATION_ASSET"] = str(xray_dir)
-            self.proc = subprocess.Popen(
-                [str(self.xray_path), "run", "-config", str(cfg_path)],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                cwd=str(xray_dir),
-                env=env,
-            )
-            if not wait_ports(self._ready_ports(), self.ready_timeout):
+            err_path = Path(self.temp_dir.name) / "xray_stderr.log"
+            err_fp = open(err_path, "wb")
+            try:
+                self.proc = subprocess.Popen(
+                    [str(self.xray_path), "run", "-config", str(cfg_path)],
+                    stdout=subprocess.DEVNULL,
+                    stderr=err_fp,
+                    cwd=str(xray_dir),
+                    env=env,
+                )
+            finally:
+                err_fp.close()
+
+            if not wait_ports(self._ready_ports(), self.ready_timeout, proc=self.proc):
+                rc = self.proc.poll()
+                if rc is not None:
+                    detail = ""
+                    try:
+                        raw_err = err_path.read_text(encoding="utf-8", errors="replace").strip()
+                        if raw_err:
+                            detail = raw_err.splitlines()[-1][:200]
+                    except OSError as exc:
+                        logger.debug("Could not read Xray stderr log %s: %s", err_path, exc)
+                    msg = f"Xray exited early (code {rc}): {detail}" if detail else f"Xray exited early (code {rc})"
+                    logger.warning("%s", msg)
+                    raise RuntimeError(msg)
                 raise TimeoutError("Xray did not open SOCKS port(s) within timeout")
             return self
         except BaseException:

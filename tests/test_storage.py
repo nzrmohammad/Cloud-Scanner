@@ -219,3 +219,15 @@ def test_save_results_none_longevity_loss_no_crash():
         report = save_scan_summary_report(results, out_dir, vless_config=v)
         assert report.exists()
 
+
+def test_save_results_zero_working_vs_filtered(tmp_path):
+    failed_only = [ScanResult(ip="104.16.1.1", port=443, ok=False, error="Timeout")]
+    txt1, _ = save_results(failed_only, tmp_path, "clean_ips_empty")
+    content1 = txt1.read_text(encoding="utf-8")
+    assert "No working endpoints were found." in content1
+    assert "No results matched the selected filters." not in content1
+
+    ok_slow = [ScanResult(ip="104.16.1.1", port=443, ok=True, latency_ms=500.0)]
+    txt2, _ = save_results(ok_slow, tmp_path, "clean_ips_filtered", max_latency_ms=100.0)
+    assert "No results matched the selected filters." in txt2.read_text(encoding="utf-8")
+

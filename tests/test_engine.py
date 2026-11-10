@@ -258,4 +258,72 @@ def test_execute_post_scan_stability_skips_longevity(monkeypatch):
         assert len(out_res) == 1
 
 
+def test_run_latency_scan_batch_fallback_no_duplicate_on_interrupt(monkeypatch, tmp_path):
+    from scanner.engine import run_latency_scan
+    from scanner.models import ScanInterrupted, VlessConfig
+
+    v = VlessConfig(uuid="dummy", host="test.com", port=443)
+    pairs = [(f"104.16.1.{i}", 443) for i in range(1, 13)]  # 2 chunks when concurrency=2 -> batch_size=10 (10 + 2)
+
+    class FakeBatch:
+        call_num = 0
+
+        def __init__(self, *args, **kwargs):
+            FakeBatch.call_num += 1
+            self.idx = FakeBatch.call_num
+
+        def __enter__(self):
+            if self.idx == 2:
+                raise RuntimeError("Batch failed on chunk 2")
+            return self
+
+        def __exit__(self, *args):
+            pass
+
+        def get_proxies_for_endpoint(self, ip, port):
+            return {"http": "socks5h://127.0.0.1:1080"}
+
+    def fake_probe(ip, port, proxies, timeout, url):
+        return ScanResult(ip=ip, port=port, ok=True, latency_ms=25.0, status_code=204), ""
+
+    def fake_fallback_test_ip(*args, **kwargs):
+        raise KeyboardInterrupt()
+
+    monkeypatch.setattr("scanner.engine.BatchXrayProcess", FakeBatch)
+    monkeypatch.setattr("scanner.engine._probe_via_proxies", fake_probe)
+    monkeypatch.setattr("scanner.engine.test_ip", fake_fallback_test_ip)
+
+    with pytest.raises(ScanInterrupted) as exc_info:
+        run_latency_scan(v, pairs, tmp_path / "xray", concurrency=2, timeout=2, tries=1)
+
+    partial = exc_info.value.results
+    assert len(partial) == 10
+    assert len({(r.ip, r.port) for r in partial}) == 10
+
+
+def test_enrich_results_with_colo_concurrent_fallback(monkeypatch, tmp_path):
+    from scanner.engine import enrich_results_with_colo
+    from scanner.models import VlessConfig
+
+    v = VlessConfig(uuid="dummy", host="test.com", port=443)
+    res = [ScanResult(ip=f"104.16.1.{i}", port=443, ok=True) for i in range(1, 4)]
+
+    class FailBatch:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def __enter__(self):
+            raise RuntimeError("Batch init failed")
+
+        def __exit__(self, *args):
+            pass
+
+    monkeypatch.setattr("scanner.engine.enrich_results_with_geoip", lambda *a, **kw: None)
+    monkeypatch.setattr("scanner.engine.BatchXrayProcess", FailBatch)
+    monkeypatch.setattr("scanner.engine.resolve_endpoint_colo", lambda _v, ip, port, _x, timeout=3: "FRA")
+
+    enrich_results_with_colo(v, res, tmp_path / "xray", workers=3, timeout=2)
+    assert [r.colo for r in res] == ["FRA", "FRA", "FRA"]
+
+
 

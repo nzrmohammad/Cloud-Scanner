@@ -102,3 +102,42 @@ def test_adapt_config_for_xray_version():
     assert "allowInsecure" not in tls_settings
     assert ws_settings["host"] == "example.com"
     assert "headers" not in ws_settings
+
+
+def test_xray_early_exit_raises_runtime_error_quickly(monkeypatch, tmp_path):
+    import time
+
+    from scanner.xray import XrayProcess
+
+    class FakeProc:
+        def poll(self):
+            return 23
+
+        def terminate(self):
+            pass
+
+        def wait(self, timeout=None):
+            return 23
+
+        def kill(self):
+            pass
+
+    def fake_popen(cmd, **kwargs):
+        stderr_file = kwargs.get("stderr")
+        if stderr_file is not None:
+            stderr_file.write(b"failed to start: invalid tls config\n")
+            stderr_file.flush()
+        return FakeProc()
+
+    monkeypatch.setattr("subprocess.Popen", fake_popen)
+    monkeypatch.setattr("scanner.xray._cached_xray_version", lambda _p: "26.11.9")
+
+    v = parse_vless("vless://uuid@example.com:443?security=tls&type=ws#Early")
+    t0 = time.monotonic()
+    with pytest.raises(RuntimeError) as exc_info:
+        with XrayProcess(tmp_path / "xray", v, "1.1.1.1", 443, ready_timeout=5.0):
+            pass
+    elapsed = time.monotonic() - t0
+    assert elapsed < 1.0
+    assert "code 23" in str(exc_info.value)
+    assert "invalid tls config" in str(exc_info.value)

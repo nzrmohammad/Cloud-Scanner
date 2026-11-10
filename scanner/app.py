@@ -24,6 +24,7 @@ from scanner.engine import (
     run_speed_stage,
     run_stability_stage,
 )
+from scanner.geoip import set_geoip_cache_dir
 from scanner.logger import get_logger, setup_logging
 from scanner.models import (
     NavigationBack,
@@ -250,6 +251,7 @@ class CloudScannerApp:
                 output_dir.mkdir(parents=True, exist_ok=True)
                 self.last_output_dir = output_dir
                 setup_logging(output_dir)
+                set_geoip_cache_dir(output_dir)
 
                 while True:
                     total_endpoints = len(targets) * len(ports)
@@ -387,6 +389,7 @@ class CloudScannerApp:
 
         out_dir = Path(args.output_dir)
         setup_logging(out_dir)
+        set_geoip_cache_dir(out_dir)
 
         try:
             v = parse_vless(cfg_val)

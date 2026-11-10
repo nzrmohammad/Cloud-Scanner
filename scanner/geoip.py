@@ -7,6 +7,7 @@ import unicodedata
 import urllib.error
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from scanner.constants import app_dir
@@ -21,6 +22,18 @@ except ImportError:
     requests = None  # type: ignore[assignment]
 
 _GEOIP_CACHE_FILE = app_dir() / "results" / "geoip_cache.json"
+
+
+def set_geoip_cache_dir(output_dir: Optional[Path]) -> None:
+    """Update the disk cache directory (e.g. when user specifies custom --output-dir)."""
+    global _GEOIP_CACHE_FILE, _CACHE_LOADED
+    if output_dir is None:
+        return
+    target = Path(output_dir) / "geoip_cache.json"
+    with _CACHE_LOCK:
+        if target != _GEOIP_CACHE_FILE:
+            _GEOIP_CACHE_FILE = target
+            _CACHE_LOADED = False
 _GEOIP_CACHE: Dict[str, Tuple[Optional[str], Optional[str], Optional[str]]] = {}
 _GEOIP_CACHE_TS: Dict[str, float] = {}
 _CACHE_LOADED = False
@@ -256,8 +269,8 @@ def _flush_cache() -> None:
                     for k, v in existing.items():
                         if isinstance(v, dict) and (now - v.get("ts", 0)) < _CACHE_TTL_SECONDS:
                             data[k] = v
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug("Ignoring unreadable geoip cache file %s: %s", _GEOIP_CACHE_FILE, exc)
         for ip, res in _GEOIP_CACHE.items():
             data[ip] = {
                 "country": res[0],
@@ -273,9 +286,10 @@ def _flush_cache() -> None:
 
 
 def _save_cache_entry(ip: str, res: Tuple[Optional[str], Optional[str], Optional[str]]) -> None:
-    _GEOIP_CACHE[ip] = res
-    _GEOIP_CACHE_TS[ip] = time.time()
-    _flush_cache()
+    with _CACHE_LOCK:
+        _GEOIP_CACHE[ip] = res
+        _GEOIP_CACHE_TS[ip] = time.time()
+        _flush_cache()
 
 
 def _sanitize_string(val: Optional[str], max_len: int = 20) -> str:
