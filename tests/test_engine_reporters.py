@@ -151,3 +151,22 @@ def test_show_final_results_28_endpoints_and_display_limit_none(monkeypatch, tmp
     out_lines.clear()
     screens.show_final_results(results, tmp_path / "clean_ips.txt", tmp_path / "clean_ips.csv", display_limit=None)
     assert "104.16.1.28:443" in "\n".join(out_lines)
+
+
+def test_show_final_results_save_recommendations_false_skips_write(monkeypatch, tmp_path):
+    from scanner.ui import screens
+
+    results = [
+        ScanResult(ip="104.16.1.1", port=443, ok=True, latency_ms=25.0, status_code=204),
+    ]
+    monkeypatch.setattr(screens, "RICH", False)
+    monkeypatch.setattr(screens, "console", None)
+    monkeypatch.setattr("builtins.print", lambda *a, **k: None)
+
+    screens.show_final_results(
+        results,
+        tmp_path / "clean_ips.txt",
+        tmp_path / "clean_ips.csv",
+        save_recommendations=False,
+    )
+    assert not (tmp_path / "recommended_configs.txt").exists()

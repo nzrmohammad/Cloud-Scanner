@@ -3,7 +3,7 @@ import sys
 from pathlib import Path
 from typing import List, Optional, Tuple
 
-from scanner.analytics import get_smart_recommendations
+from scanner.analytics import apply_result_filters, get_smart_recommendations
 from scanner.config import ConfigManager, load_saved_vless_config, parse_vless, save_vless_config
 from scanner.constants import (
     APP_HEADER,
@@ -174,6 +174,7 @@ class CloudScannerApp:
                 self.last_csv or (self.last_output_dir / "clean_ips.csv"),
                 filename_prefix=self.last_prefix or "clean_ips",
                 vless_config=self.last_vless,
+                save_recommendations=False,
             )
         else:
             clean_file = self.last_output_dir / "clean_ips.txt"
@@ -442,6 +443,7 @@ class CloudScannerApp:
 
         show_final_results(results, txt, csvp, vless_config=v)
         final_results = [r for r in results if r.ok]
+        final_prefix = "clean_ips"
 
         if args.recheck and final_results:
             try:
@@ -459,14 +461,15 @@ class CloudScannerApp:
                 )
                 if not args.longevity_test and not args.speed_test:
                     enrich_results_with_colo(v, final_results, xray, workers=args.recheck_workers or args.concurrency, timeout=args.timeout)
-                txt, csvp = save_results(final_results, out_dir, "clean_ips_rechecked", vless_config=v)
+                final_prefix = "clean_ips_rechecked"
+                txt, csvp = save_results(final_results, out_dir, final_prefix, vless_config=v)
             except ScanInterrupted as interrupted:
                 final_results = interrupted.results
                 txt, csvp = save_results(final_results, out_dir, "clean_ips_rechecked_interrupted", vless_config=v)
                 cprint("Ctrl+C detected. Partial re-check results were saved.", "yellow")
                 show_final_results(final_results, txt, csvp, filename_prefix="clean_ips_rechecked", vless_config=v)
                 return 130
-            show_final_results(final_results, txt, csvp, filename_prefix="clean_ips_rechecked", vless_config=v)
+            show_final_results(final_results, txt, csvp, filename_prefix=final_prefix, vless_config=v)
 
         if args.longevity_test and final_results:
             try:
@@ -483,14 +486,15 @@ class CloudScannerApp:
                 )
                 if not args.speed_test:
                     enrich_results_with_colo(v, final_results, xray, workers=args.speed_workers, timeout=args.timeout)
-                txt, csvp = save_results(final_results, out_dir, "clean_ips_longevity", vless_config=v)
+                final_prefix = "clean_ips_longevity"
+                txt, csvp = save_results(final_results, out_dir, final_prefix, vless_config=v)
             except ScanInterrupted as interrupted:
                 final_results = interrupted.results
                 txt, csvp = save_results(final_results, out_dir, "clean_ips_longevity_interrupted", vless_config=v)
                 cprint("Ctrl+C detected. Partial anti-drop results were saved.", "yellow")
                 show_final_results(final_results, txt, csvp, filename_prefix="clean_ips_longevity", vless_config=v)
                 return 130
-            show_final_results(final_results, txt, csvp, filename_prefix="clean_ips_longevity", vless_config=v)
+            show_final_results(final_results, txt, csvp, filename_prefix=final_prefix, vless_config=v)
 
         if args.speed_test and final_results:
             try:
@@ -510,22 +514,31 @@ class CloudScannerApp:
                     make_reporter=progress_reporter,
                 )
                 enrich_results_with_colo(v, final_results, xray, workers=args.speed_workers, timeout=args.timeout)
-                txt, csvp = save_results(final_results, out_dir, "clean_ips_speed_tested", include_speed_errors=True, vless_config=v)
+                final_prefix = "clean_ips_speed_tested"
+                txt, csvp = save_results(final_results, out_dir, final_prefix, include_speed_errors=True, vless_config=v)
             except ScanInterrupted as interrupted:
                 final_results = interrupted.results
                 txt, csvp = save_results(final_results, out_dir, "clean_ips_speed_tested_interrupted", include_speed_errors=True, vless_config=v)
                 cprint("Ctrl+C detected. Partial speed-test results were saved.", "yellow")
                 show_final_results(final_results, txt, csvp, filename_prefix="clean_ips_speed_tested", vless_config=v)
                 return 130
-            show_final_results(final_results, txt, csvp, filename_prefix="clean_ips_speed_tested", vless_config=v)
+            show_final_results(final_results, txt, csvp, filename_prefix=final_prefix, vless_config=v)
+
+        if final_results:
+            if not args.recheck and not args.longevity_test and not args.speed_test:
+                enrich_results_with_colo(v, final_results, xray, workers=min(args.concurrency, 20), timeout=args.timeout)
+                save_results(final_results, out_dir, "clean_ips", vless_config=v)
+
+            summary_results = final_results
             if args.max_latency > 0 or args.min_speed > 0:
+                filtered_prefix = f"{final_prefix}_filtered" if final_prefix != "clean_ips" else "clean_ips_filtered"
                 txt, csvp = save_results(
                     final_results,
                     out_dir,
-                    "clean_ips_speed_filtered",
+                    filtered_prefix,
                     max_latency_ms=args.max_latency,
                     min_speed_mbps=args.min_speed,
-                    include_speed_errors=True,
+                    include_speed_errors=args.speed_test,
                     vless_config=v,
                 )
                 show_final_results(
@@ -534,16 +547,16 @@ class CloudScannerApp:
                     csvp,
                     max_latency_ms=args.max_latency,
                     min_speed_mbps=args.min_speed,
-                    filename_prefix="clean_ips_speed_filtered",
+                    filename_prefix=filtered_prefix,
                     vless_config=v,
                 )
-        if final_results:
-            if not args.recheck and not args.longevity_test and not args.speed_test:
-                enrich_results_with_colo(v, final_results, xray, workers=min(args.concurrency, 20), timeout=args.timeout)
-                save_results(final_results, out_dir, "clean_ips", vless_config=v)
-            recs = get_smart_recommendations(final_results, v)
+                summary_results = apply_result_filters(
+                    final_results, max_latency_ms=args.max_latency, min_speed_mbps=args.min_speed
+                )
+
+            recs = get_smart_recommendations(summary_results, v) if summary_results else []
             save_scan_summary_report(
-                final_results,
+                summary_results,
                 out_dir,
                 vless_config=v,
                 total_targets_count=total_prefilter,

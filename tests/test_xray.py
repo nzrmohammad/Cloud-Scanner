@@ -150,3 +150,46 @@ def test_normalize_xray_tag_handles_numeric_and_v_prefix():
     assert normalize_xray_tag("v26.3.27") == "v26.3.27"
     assert normalize_xray_tag("") == ""
     assert normalize_xray_tag(None) == ""
+
+
+def test_xray_transient_bind_error_retries_with_fresh_port(monkeypatch, tmp_path):
+    from scanner.xray import XrayProcess
+
+    ports_seq = iter([51001, 51002])
+    attempts = {"count": 0}
+
+    class FakeProc:
+        def __init__(self, rc):
+            self._rc = rc
+
+        def poll(self):
+            return self._rc
+
+        def terminate(self):
+            pass
+
+        def wait(self, timeout=None):
+            return self._rc or 0
+
+        def kill(self):
+            pass
+
+    def fake_popen(cmd, **kwargs):
+        attempts["count"] += 1
+        if attempts["count"] == 1:
+            stderr_file = kwargs.get("stderr")
+            if stderr_file is not None:
+                stderr_file.write(b"listen tcp 127.0.0.1:51001: bind: address already in use\n")
+                stderr_file.flush()
+            return FakeProc(23)
+        return FakeProc(None)
+
+    monkeypatch.setattr("scanner.xray.free_port", lambda: next(ports_seq))
+    monkeypatch.setattr("subprocess.Popen", fake_popen)
+    monkeypatch.setattr("scanner.xray._cached_xray_version", lambda _p: "26.11.9")
+    monkeypatch.setattr("scanner.xray.wait_ports", lambda ports, timeout, proc=None: proc is not None and proc.poll() is None)
+
+    v = parse_vless("vless://uuid@example.com:443?security=tls&type=ws#RetryBind")
+    with XrayProcess(tmp_path / "xray", v, "1.1.1.1", 443, ready_timeout=2.0) as xp:
+        assert xp.socks_port == 51002
+    assert attempts["count"] == 2

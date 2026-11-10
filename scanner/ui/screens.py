@@ -480,7 +480,11 @@ def choose_latency_test_url_tui() -> str:
 
 
 
-def render_smart_recommendations(recs: List[SmartRecommendation], output_dir: Path) -> None:
+def render_smart_recommendations(
+    recs: List[SmartRecommendation],
+    output_dir: Path,
+    save_to_disk: bool = True,
+) -> None:
     if not recs:
         return
 
@@ -507,8 +511,9 @@ def render_smart_recommendations(recs: List[SmartRecommendation], output_dir: Pa
             print(f"  {rec.category:<12} -> {rec.result.endpoint:<20}{colo_str} ({rec.reason})")
         print("=======================================================\n")
 
-    from scanner.storage import save_recommended_configs
-    save_recommended_configs(recs, output_dir)
+    if save_to_disk:
+        from scanner.storage import save_recommended_configs
+        save_recommended_configs(recs, output_dir)
 
 
 def _rich_drop_badge(r: ScanResult) -> str:
@@ -528,6 +533,7 @@ def show_final_results(
     filename_prefix: str = "clean_ips",
     vless_config: Optional[VlessConfig] = None,
     display_limit: Optional[int] = 50,
+    save_recommendations: bool = True,
 ) -> None:
     ok = apply_result_filters(results, max_latency_ms=max_latency_ms, min_speed_mbps=min_speed_mbps)
     is_full = "full" in filename_prefix or any(r.jitter_ms is not None and r.speed_mbps is not None for r in ok)
@@ -683,7 +689,7 @@ def show_final_results(
         console.print(table)
 
         recs = get_smart_recommendations(ok, vless_config=vless_config)
-        render_smart_recommendations(recs, output_dir)
+        render_smart_recommendations(recs, output_dir, save_to_disk=save_recommendations)
     else:
         print(f"\nScan Finished | Working: {len(ok)} | Failed: {failed} | Filtered: {filtered_out}")
         if not ok and failed > 0:
@@ -733,7 +739,7 @@ def show_final_results(
             print(f"... and {len(ok) - len(display_items)} more endpoints (full list saved to {txt_path.name})")
 
         recs = get_smart_recommendations(ok, vless_config=vless_config)
-        render_smart_recommendations(recs, output_dir)
+        render_smart_recommendations(recs, output_dir, save_to_disk=save_recommendations)
 
 
 def handle_post_scan_testing_tui(

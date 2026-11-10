@@ -31,6 +31,23 @@ _ACTIVE_PROCESSES: Set["_BaseXrayProcess"] = set()
 class XrayStartupError(RuntimeError):
     """Raised when the Xray binary exits with an error before opening SOCKS ports."""
 
+    def __init__(self, message: str, transient: bool = False):
+        super().__init__(message)
+        self.transient = transient
+
+
+def _is_port_bind_error(detail: str) -> bool:
+    """Return True if Xray stderr indicates a local SOCKS port-bind collision."""
+    low = (detail or "").lower()
+    return any(
+        hint in low
+        for hint in (
+            "address already in use",
+            "only one usage of each socket address",
+            "failed to listen on",
+        )
+    )
+
 
 def normalize_xray_tag(tag: Optional[str]) -> str:
     """Ensure an Xray-core release tag has a leading 'v' prefix when non-empty."""
@@ -536,34 +553,41 @@ class _BaseXrayProcess:
     def _ready_ports(self) -> List[int]:
         raise NotImplementedError
 
-    def __enter__(self):
-        with _ACTIVE_PROC_LOCK:
-            _ACTIVE_PROCESSES.add(self)
-        try:
-            try:
-                self.temp_dir = tempfile.TemporaryDirectory(prefix=self._temp_prefix, ignore_cleanup_errors=True)  # type: ignore[call-overload]
-            except TypeError:
-                self.temp_dir = tempfile.TemporaryDirectory(prefix=self._temp_prefix)
-            cfg_path = Path(self.temp_dir.name) / "config.json"
-            cfg_path.write_text(json.dumps(self._build_config(), separators=(",", ":")), encoding="utf-8")
+    def _reallocate_ports(self) -> None:
+        """Reallocate local SOCKS ports on transient bind conflict."""
 
+    def __enter__(self):
+        try:
             xray_dir = self.xray_path.parent
             env = os.environ.copy()
             env["XRAY_LOCATION_ASSET"] = str(xray_dir)
-            err_path = Path(self.temp_dir.name) / "xray_stderr.log"
-            err_fp = open(err_path, "wb")
-            try:
-                self.proc = subprocess.Popen(
-                    [str(self.xray_path), "run", "-config", str(cfg_path)],
-                    stdout=subprocess.DEVNULL,
-                    stderr=err_fp,
-                    cwd=str(xray_dir),
-                    env=env,
-                )
-            finally:
-                err_fp.close()
 
-            if not wait_ports(self._ready_ports(), self.ready_timeout, proc=self.proc):
+            for attempt in range(2):
+                with _ACTIVE_PROC_LOCK:
+                    _ACTIVE_PROCESSES.add(self)
+                try:
+                    self.temp_dir = tempfile.TemporaryDirectory(prefix=self._temp_prefix, ignore_cleanup_errors=True)  # type: ignore[call-overload]
+                except TypeError:
+                    self.temp_dir = tempfile.TemporaryDirectory(prefix=self._temp_prefix)
+                cfg_path = Path(self.temp_dir.name) / "config.json"
+                cfg_path.write_text(json.dumps(self._build_config(), separators=(",", ":")), encoding="utf-8")
+
+                err_path = Path(self.temp_dir.name) / "xray_stderr.log"
+                err_fp = open(err_path, "wb")
+                try:
+                    self.proc = subprocess.Popen(
+                        [str(self.xray_path), "run", "-config", str(cfg_path)],
+                        stdout=subprocess.DEVNULL,
+                        stderr=err_fp,
+                        cwd=str(xray_dir),
+                        env=env,
+                    )
+                finally:
+                    err_fp.close()
+
+                if wait_ports(self._ready_ports(), self.ready_timeout, proc=self.proc):
+                    return self
+
                 rc = self.proc.poll()
                 if rc is not None:
                     detail = ""
@@ -573,9 +597,15 @@ class _BaseXrayProcess:
                             detail = raw_err.splitlines()[-1][:200]
                     except OSError as exc:
                         logger.debug("Could not read Xray stderr log %s: %s", err_path, exc)
+                    is_bind_conflict = _is_port_bind_error(detail)
+                    if is_bind_conflict and attempt == 0:
+                        logger.debug("Transient SOCKS port-bind collision for Xray, retrying with fresh port(s): %s", detail)
+                        self.close()
+                        self._reallocate_ports()
+                        continue
                     msg = f"Xray exited early (code {rc}): {detail}" if detail else f"Xray exited early (code {rc})"
                     logger.warning("%s", msg)
-                    raise XrayStartupError(msg)
+                    raise XrayStartupError(msg, transient=is_bind_conflict)
                 raise TimeoutError("Xray did not open SOCKS port(s) within timeout")
             return self
         except BaseException:
@@ -680,6 +710,9 @@ class XrayProcess(_BaseXrayProcess):
     def _ready_ports(self) -> List[int]:
         return [self.socks_port]
 
+    def _reallocate_ports(self) -> None:
+        self.socks_port = free_port()
+
     @property
     def socks_url(self) -> str:
         return f"socks5h://127.0.0.1:{self.socks_port}"
@@ -719,6 +752,10 @@ class BatchXrayProcess(_BaseXrayProcess):
 
     def _ready_ports(self) -> List[int]:
         return [sp for _, _, sp in self.endpoint_ports]
+
+    def _reallocate_ports(self) -> None:
+        allocated = free_ports(len(self.endpoints))
+        self.endpoint_ports = [(ip, p, sp) for (ip, p), sp in zip(self.endpoints, allocated)]
 
     def get_proxies_for_endpoint(self, ip: str, port: int) -> Optional[Dict[str, str]]:
         for ep_ip, ep_port, socks_port in self.endpoint_ports:

@@ -60,3 +60,10 @@ def test_overlapping_ranges_merged_before_sampling():
     sampled = expand_targets(["192.168.1.1-10", "192.168.1.5-15"], max_hosts=15, sample_if_too_many=True)
     assert len(sampled) == 15
     assert set(sampled) == {f"192.168.1.{i}" for i in range(1, 16)}
+
+
+def test_expand_targets_range_with_port():
+    res1 = expand_targets(["192.168.1.10-12:8443"], max_hosts=10)
+    assert res1 == ["192.168.1.10:8443", "192.168.1.11:8443", "192.168.1.12:8443"]
+    res2 = expand_targets(["192.168.1.20-192.168.1.21:2053"], max_hosts=10)
+    assert res2 == ["192.168.1.20:2053", "192.168.1.21:2053"]

@@ -152,8 +152,15 @@ def _parse_single_target_source(token: str) -> Optional[TargetSource]:
         return TargetSource(start=start, end=end, version=net.version, label=token) if end >= start else None
 
     if "-" in token:
-        start_s, end_s = [x.strip() for x in token.split("-", 1)]
+        start_s, end_raw = [x.strip() for x in token.split("-", 1)]
         start_ip = ipaddress.ip_address(start_s)
+        range_port: Optional[int] = None
+        end_s = end_raw
+        if start_ip.version == 4 and ":" in end_raw:
+            end_s, port_s = end_raw.rsplit(":", 1)
+            if not port_s.isdigit() or not (1 <= int(port_s) <= 65535):
+                raise ValueError(f"Invalid IP range port: {token}")
+            range_port = int(port_s)
         if end_s.isdigit() and start_ip.version == 4:
             last_octet = int(end_s)
             if not 0 <= last_octet <= 255:
@@ -162,7 +169,7 @@ def _parse_single_target_source(token: str) -> Optional[TargetSource]:
         end_ip = ipaddress.ip_address(end_s)
         if start_ip.version != end_ip.version or int(end_ip) < int(start_ip):
             raise ValueError(f"Invalid IP range: {token}")
-        return TargetSource(start=int(start_ip), end=int(end_ip), version=start_ip.version, label=token)
+        return TargetSource(start=int(start_ip), end=int(end_ip), version=start_ip.version, label=token, port=range_port)
 
     host_str, port = parse_ip_and_port(token)
     ip = ipaddress.ip_address(host_str)

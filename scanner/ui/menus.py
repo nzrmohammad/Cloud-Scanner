@@ -127,7 +127,6 @@ def build_menu_renderable(
     table.add_column("Item", style="bold white", width=item_w, max_width=item_w, no_wrap=True, overflow="ellipsis")
     table.add_column("Info", style="dim", width=info_w, max_width=info_w, no_wrap=True, overflow="ellipsis")
 
-    visible_count = end_idx - start_idx
     for i in range(start_idx, end_idx):
         name, detail = rows[i]
         marker = ">" if i == cursor else " "
@@ -135,11 +134,6 @@ def build_menu_renderable(
         icon = check if multi else marker
         row_style = "bold black on cyan" if i == cursor else ("green" if i in selected else "")
         table.add_row(icon, str(i + 1), name, detail, style=row_style)
-
-    # Pad empty rows to maintain fixed table height when scrolling paginated lists
-    if total_items > max_visible and visible_count < max_visible:
-        for _ in range(max_visible - visible_count):
-            table.add_row("", "", "", "")
 
     elements.append(table)
 

@@ -16,6 +16,20 @@ _CONFIGURED_OUTPUT_DIR: Optional[Path] = None
 _MAX_LOG_BYTES = 2 * 1024 * 1024  # 2 MB per file, max 3 files (~6 MB total)
 
 
+def close_logging() -> None:
+    """Close and detach all file handlers from the 'cloud_scanner' logger."""
+    global _INITIALIZED, _CONFIGURED_OUTPUT_DIR
+    root_logger = logging.getLogger("cloud_scanner")
+    for existing in list(root_logger.handlers):
+        root_logger.removeHandler(existing)
+        try:
+            existing.close()
+        except Exception:
+            pass
+    _INITIALIZED = False
+    _CONFIGURED_OUTPUT_DIR = None
+
+
 def setup_logging(output_dir: Optional[Path] = None, log_level: int = logging.DEBUG) -> logging.Logger:
     """Initialize the root 'cloud_scanner' logger with a rotating file handler in output_dir."""
     global _INITIALIZED, _CONFIGURED_OUTPUT_DIR
@@ -36,12 +50,8 @@ def setup_logging(output_dir: Optional[Path] = None, log_level: int = logging.DE
         target_dir.mkdir(parents=True, exist_ok=True)
         log_file = target_dir / "scanner.log"
 
-        for existing in list(root_logger.handlers):
-            root_logger.removeHandler(existing)
-            try:
-                existing.close()
-            except Exception:
-                pass
+        close_logging()
+        root_logger.setLevel(log_level)
 
         handler = RotatingFileHandler(
             str(log_file),

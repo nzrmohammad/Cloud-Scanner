@@ -292,8 +292,11 @@ def test_ip(
                     return res
                 last_error = err
         except XrayStartupError as exc:
-            logger.warning("Xray startup failed for %s:%d: %s", ip, port, exc)
-            return ScanResult(ip=ip, port=port, ok=False, error=str(exc).split("\n", 1)[0][:160])
+            if not exc.transient:
+                logger.warning("Xray startup failed for %s:%d: %s", ip, port, exc)
+                return ScanResult(ip=ip, port=port, ok=False, error=str(exc).split("\n", 1)[0][:160])
+            logger.debug("Transient Xray startup error for %s:%d: %s", ip, port, exc)
+            last_error = str(exc).split("\n", 1)[0][:160]
         except TimeoutError:
             last_error = "Xray SOCKS port did not start"
         except Exception as exc:
@@ -973,20 +976,20 @@ def run_latency_scan(
             ev.set()
             terminate_active_xray_processes()
             raise ScanInterrupted(results, "scan") from exc
-        except XrayStartupError as exc:
-            logger.error("Fatal Xray startup error, aborting remaining scan chunks: %s", exc)
-            err_msg = str(exc).split("\n", 1)[0][:160]
-            for ep_ip, ep_port in target_pairs[i:]:
-                res = ScanResult(ip=ep_ip, port=ep_port, ok=False, error=err_msg)
-                results.append(res)
-                done += 1
-                if on_result:
-                    try:
-                        on_result(res, done, total)
-                    except Exception as cb_exc:
-                        logger.debug("on_result callback error in fatal scan abort: %s", cb_exc)
-            break
         except Exception as exc:
+            if isinstance(exc, XrayStartupError) and not exc.transient:
+                logger.error("Fatal Xray startup error, aborting remaining scan chunks: %s", exc)
+                err_msg = str(exc).split("\n", 1)[0][:160]
+                for ep_ip, ep_port in target_pairs[i:]:
+                    res = ScanResult(ip=ep_ip, port=ep_port, ok=False, error=err_msg)
+                    results.append(res)
+                    done += 1
+                    if on_result:
+                        try:
+                            on_result(res, done, total)
+                        except Exception as cb_exc:
+                            logger.debug("on_result callback error in fatal scan abort: %s", cb_exc)
+                break
             logger.debug("BatchXrayProcess failed for scan chunk (%s), falling back to individual test_ip", exc)
             try:
                 chunk_res = _run_concurrent_tasks(
