@@ -205,7 +205,7 @@ def render_startup_check(xray_path: Optional[Path]) -> bool:
     rows.append(("requests[socks]", "[green]FOUND[/green]" if env["requests_ok"] else "[red]MISSING[/red]"))
 
     if RICH and console is not None and Table is not None:
-        table = Table(title="Startup Check", box=box.ROUNDED, border_style="cyan")
+        table = Table(title="Startup Check", box=box.ROUNDED, border_style="cyan", expand=False)
         table.add_column("Component", style="white")
         table.add_column("Status")
         for name, status in rows:
@@ -275,7 +275,7 @@ def render_welcome_config_screen(
 def show_config_summary(v: VlessConfig) -> None:
     q = v.query
     if RICH and console is not None and Table is not None:
-        table = Table(title="Configuration Summary", box=box.ROUNDED, border_style="green")
+        table = Table(title="Configuration Summary", box=box.ROUNDED, border_style="green", expand=False)
         table.add_column("Property", style="bold cyan")
         table.add_column("Value", style="bold white")
         table.add_row("Remark", v.remark or "(empty)")
@@ -341,7 +341,11 @@ def ask_max_targets(default: int = MAX_DEFAULT_HOSTS) -> int:
     while True:
         try:
             if RICH and Prompt is not None:
-                raw = Prompt.ask("[bold yellow]Maximum targets to load/scan[/bold yellow] [dim](default unlimited, b=back)[/dim]", default="")
+                raw = Prompt.ask(
+                    "[bold yellow]Maximum targets to load/scan[/bold yellow] [dim](default unlimited, b=back)[/dim]",
+                    default="",
+                    show_default=False,
+                )
             else:
                 raw = input("Maximum targets to load/scan (default unlimited, b=back): ").strip()
             raw = (raw or "").strip().lower()
@@ -519,6 +523,7 @@ def show_final_results(
     min_speed_mbps: float = 0,
     filename_prefix: str = "clean_ips",
     vless_config: Optional[VlessConfig] = None,
+    display_limit: Optional[int] = 50,
 ) -> None:
     ok = apply_result_filters(results, max_latency_ms=max_latency_ms, min_speed_mbps=min_speed_mbps)
     is_full = "full" in filename_prefix or any(r.jitter_ms is not None and r.speed_mbps is not None for r in ok)
@@ -531,8 +536,7 @@ def show_final_results(
     filtered_out = len([r for r in results if r.ok]) - len(ok)
 
     output_dir = txt_path.parent
-    display_limit = 25
-    display_items = ok[:display_limit]
+    display_items = ok if display_limit is None else ok[:display_limit]
 
     if RICH and console is not None and Panel is not None and Table is not None:
         has_longevity = any(r.sustained is not None for r in ok)
@@ -557,10 +561,14 @@ def show_final_results(
                 )
             )
             return
-        title_txt = f"Best Results (Showing {min(len(ok), display_limit)} of {len(ok)})" if len(ok) > display_limit else "Best Results"
+        if not ok:
+            console.print(Panel("[bold yellow]No endpoints matched the active filters.[/bold yellow]", border_style="yellow", expand=False))
+            return
+        shown_count = len(display_items)
+        title_txt = f"Best Results (Showing {shown_count} of {len(ok)})" if len(ok) > shown_count else "Best Results"
         table = Table(title=title_txt, box=box.ROUNDED, border_style="cyan", expand=False, pad_edge=False)
-        if len(ok) > display_limit:
-            table.caption = f"[dim]Showing top {display_limit} of {len(ok)} endpoints. Full results saved to {txt_path.name}[/dim]"
+        if len(ok) > shown_count:
+            table.caption = f"[dim]Showing top {shown_count} of {len(ok)} endpoints. Full results saved to {txt_path.name}[/dim]"
         table.add_column("#", justify="right", style="dim", no_wrap=True)
         table.add_column("IP", style="bold white", no_wrap=True)
         table.add_column("Port", justify="center", style="bold cyan", no_wrap=True)
@@ -682,6 +690,9 @@ def show_final_results(
             for hint in hints:
                 print(f"  * {hint}")
             return
+        if not ok:
+            print("No endpoints matched the active filters.")
+            return
         for i, r in enumerate(display_items, 1):
             loc_str = f" loc={format_ip_location(r.ip_country, r.ip_city)}" if r.ip_country else ""
             colo_str = f" colo={format_cf_colo(r.colo, short=True)}" if r.colo else ""
@@ -714,8 +725,8 @@ def show_final_results(
             else:
                 latency = f"{r.latency_ms:.1f} ms" if r.latency_ms is not None else "-"
                 print(f"{i}. {r.endpoint}{loc_str}{colo_str} latency={latency} HTTP {http_str}")
-        if len(ok) > display_limit:
-            print(f"... and {len(ok) - display_limit} more endpoints (full list saved to {txt_path.name})")
+        if len(ok) > len(display_items):
+            print(f"... and {len(ok) - len(display_items)} more endpoints (full list saved to {txt_path.name})")
 
         recs = get_smart_recommendations(ok, vless_config=vless_config)
         render_smart_recommendations(recs, output_dir)

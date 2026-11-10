@@ -154,7 +154,7 @@ class CloudScannerApp:
         self.last_output_dir: Path = app_dir() / "results"
 
     def interactive(self) -> int:
-        """Run interactive TUI mode within an alternate screen buffer."""
+        """Run interactive TUI mode in the normal scrollable terminal buffer."""
         xray = find_xray()
 
         with tui_screen():
@@ -331,7 +331,28 @@ class CloudScannerApp:
                     self.last_prefix = prefix
                     self.last_vless = v
 
-                    pause("\n> Press Enter to view action options (Scan Again / Retest / Exit)...")
+                    if len(final_results) > 50:
+                        view_choice = prompt_str(
+                            f"\n> Press Enter for action options, or type 'v' to view all {len(final_results)} results",
+                            default="",
+                        ).lower()
+                        if view_choice in {"v", "view", "all"}:
+                            render_stage(
+                                "All Working Results",
+                                f"Showing all {len(final_results)} endpoints. Use your terminal scrollbar / mouse wheel to scroll.",
+                                "green",
+                            )
+                            show_final_results(
+                                final_results,
+                                final_txt,
+                                final_csv,
+                                filename_prefix=prefix,
+                                vless_config=v,
+                                display_limit=None,
+                            )
+                            pause("\n> Press Enter to view action options (Scan Again / Retest / Exit)...")
+                    else:
+                        pause("\n> Press Enter to view action options (Scan Again / Retest / Exit)...")
                     action = post_scan_actions_menu(v, final_results, prefix)
                     if action == "retest_same":
                         continue

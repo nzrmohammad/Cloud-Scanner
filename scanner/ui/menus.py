@@ -81,9 +81,13 @@ def build_menu_renderable(
         ts = shutil.get_terminal_size((80, 25))
         term_cols, term_lines = ts.columns, ts.lines
 
-    overhead = 12 + (1 if multi else 0) + (1 if typed else 0) + (1 if error_msg else 0)
+    overhead = 14 + (1 if multi else 0) + (1 if typed else 0) + (1 if error_msg else 0)
+    if term_cols < 80:
+        overhead += 2
     if top_panel is not None:
-        overhead += 7
+        raw_top = getattr(top_panel, "renderable", "")
+        top_lines = (str(raw_top).count("\n") + 1) if isinstance(raw_top, str) and raw_top else 5
+        overhead += max(5, top_lines + 3)
     available_lines = max(3, term_lines - overhead)
     max_visible = min(total_items, available_lines)
 
@@ -114,10 +118,10 @@ def build_menu_renderable(
     max_title_len = max(20, term_cols - 4)
     title_display = raw_title if len(raw_title) <= max_title_len else (raw_title[: max_title_len - 3] + "...")
 
-    item_w = max(18, min(38, (term_cols - 24) // 2))
-    info_w = max(14, min(52, term_cols - item_w - 24))
+    item_w = max(14, min(38, (term_cols - 26) // 2))
+    info_w = max(12, min(52, term_cols - item_w - 26))
 
-    table = Table(title=title_display, box=box.ROUNDED, border_style="bright_blue")
+    table = Table(title=title_display, box=box.ROUNDED, border_style="bright_blue", expand=False)
     table.add_column("", justify="center", width=3, no_wrap=True)
     table.add_column("#", justify="right", width=4, style="cyan", no_wrap=True)
     table.add_column("Item", style="bold white", width=item_w, max_width=item_w, no_wrap=True, overflow="ellipsis")
@@ -329,11 +333,10 @@ def _run_interactive_menu_loop(
                 elif key in "0123456789,-*":
                     typed += key
             else:
-                if key.isdigit():
+                if key in "0123456789":
                     candidate = int(key)
-                    if 1 <= candidate <= total and total <= 9:
+                    if not typed and 1 <= candidate <= total <= 9:
                         return [candidate - 1]
-                if key.isprintable():
                     typed += key
         return None
 
@@ -442,7 +445,12 @@ def post_scan_actions_menu(
         ("Retest Same Targets", "Immediately run scan on the same targets again"),
         ("Exit", "Finish and close the scanner"),
     ]
-    choice = key_select_menu(f"Next Action [{summary}]", menu_rows, default_index=0, allow_back=False)
+    top_panel: Optional[Any] = (
+        Panel(f"[bold green]Top Highlights:[/bold green] {summary}", border_style="green", box=box.ROUNDED, expand=False)
+        if (info_parts and RICH and Panel is not None and box is not None)
+        else None
+    )
+    choice = key_select_menu("Next Action", menu_rows, default_index=0, allow_back=False, top_panel=top_panel)
 
     if choice == 0:
         return "rescan_all"

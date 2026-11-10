@@ -75,3 +75,43 @@ def test_build_menu_renderable_long_rows_no_wrap():
     assert isinstance(renderable, Group)
     table = next(r for r in renderable.renderables if isinstance(r, Table))
     assert all(col.no_wrap for col in table.columns)
+
+
+def test_build_menu_renderable_fits_compact_terminal_with_top_panel(monkeypatch):
+    from types import SimpleNamespace
+
+    from rich.panel import Panel
+
+    from scanner.ui import menus
+
+    fake_console = SimpleNamespace(size=SimpleNamespace(width=78, height=24))
+    monkeypatch.setattr(menus, "console", fake_console)
+    rows = [(f"Item {i}", f"Detail {i}") for i in range(30)]
+    top = Panel("Line 1\nLine 2\nLine 3\nLine 4", expand=False)
+    renderable = build_menu_renderable("Compact Menu", rows, cursor=10, multi=True, top_panel=top)
+    table = next(r for r in renderable.renderables if isinstance(r, Table))
+    assert table.row_count < 10
+    assert table.expand is False
+
+
+def test_windows_keys_map_home_end_delete(monkeypatch):
+    import sys
+    from types import ModuleType
+
+    from scanner.ui import keys
+
+    seq = iter(["\xe0", "G", "\xe0", "O", "\xe0", "S"])
+    fake_msvcrt = ModuleType("msvcrt")
+    fake_msvcrt.getwch = lambda: next(seq)  # type: ignore[attr-defined]
+    prev_msvcrt = sys.modules.get("msvcrt")
+    monkeypatch.setattr(keys.os, "name", "nt")
+    sys.modules["msvcrt"] = fake_msvcrt
+    try:
+        assert keys.read_key() == "home"
+        assert keys.read_key() == "end"
+        assert keys.read_key() == "delete"
+    finally:
+        if prev_msvcrt is None:
+            sys.modules.pop("msvcrt", None)
+        else:
+            sys.modules["msvcrt"] = prev_msvcrt

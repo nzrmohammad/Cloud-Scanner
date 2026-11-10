@@ -1,6 +1,6 @@
+import sys
 from contextlib import contextmanager
 from pathlib import Path
-import sys
 
 from scanner.config import parse_vless
 from scanner.engine import run_scan
@@ -110,3 +110,44 @@ def test_clear_screen_works_when_stdout_proxied_by_rich(monkeypatch):
 
     terminal.clear_screen()
     assert "\033[2J\033[3J\033[H" in "".join(writes)
+
+
+def test_tui_screen_does_not_lock_alternate_buffer(monkeypatch):
+    """Ensure tui_screen() avoids console.screen() so terminal scrollback remains active."""
+    entered = []
+
+    class FakeConsole:
+        is_terminal = True
+
+        def screen(self, **kwargs):
+            raise AssertionError("console.screen() alternate buffer must not be called")
+
+        def show_cursor(self, show=True):
+            entered.append(("cursor", show))
+
+    monkeypatch.setattr(terminal, "console", FakeConsole())
+    with terminal.tui_screen():
+        entered.append(("body", True))
+    assert ("body", True) in entered
+    assert ("cursor", True) in entered
+
+
+def test_show_final_results_28_endpoints_and_display_limit_none(monkeypatch, tmp_path):
+    from scanner.ui import screens
+
+    results = [
+        ScanResult(ip=f"104.16.1.{i}", port=443, ok=True, latency_ms=20.0 + i, status_code=204)
+        for i in range(1, 29)
+    ]
+    out_lines = []
+    monkeypatch.setattr(screens, "RICH", False)
+    monkeypatch.setattr(screens, "console", None)
+    monkeypatch.setattr("builtins.print", lambda *a, **k: out_lines.append(" ".join(str(x) for x in a)))
+
+    screens.show_final_results(results, tmp_path / "clean_ips.txt", tmp_path / "clean_ips.csv")
+    joined = "\n".join(out_lines)
+    assert "104.16.1.28:443" in joined
+
+    out_lines.clear()
+    screens.show_final_results(results, tmp_path / "clean_ips.txt", tmp_path / "clean_ips.csv", display_limit=None)
+    assert "104.16.1.28:443" in "\n".join(out_lines)

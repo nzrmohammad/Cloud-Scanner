@@ -75,26 +75,26 @@ def cprint(text: str = "", style: Optional[str] = None) -> None:
 
 @contextmanager
 def tui_screen() -> Generator[None, None, None]:
-    """Context manager entering the terminal's alternate screen buffer.
-    Ensures cursor visibility and clean restoration on exit, error, or Ctrl+C.
+    """Run the interactive TUI in the normal scrollable console buffer.
+
+    Avoids the terminal alternate screen buffer so mouse-wheel / scrollbar
+    scrolling always works for tall result tables and scan logs, while ensuring
+    cursor visibility is cleanly restored on exit, error, or Ctrl+C.
     """
-    if RICH and console is not None and getattr(console, "is_terminal", False):
-        try:
-            with console.screen(hide_cursor=False):
-                yield
-        finally:
+    try:
+        yield
+    finally:
+        if RICH and console is not None and getattr(console, "is_terminal", False):
             try:
                 console.show_cursor(True)
             except Exception:
                 pass
-    else:
-        try:
-            yield
-        finally:
-            if sys.stdout.isatty():
+        else:
+            real_stdout = getattr(sys, "__stdout__", None) or sys.stdout
+            if real_stdout is not None and real_stdout.isatty():
                 try:
-                    sys.stdout.write("\033[?25h")
-                    sys.stdout.flush()
+                    real_stdout.write("\033[?25h")
+                    real_stdout.flush()
                 except Exception:
                     pass
 
@@ -226,7 +226,7 @@ def render_stage(title: str, subtitle: str = "", border_style: str = "cyan", cle
     """Render the current TUI stage box. If clear is True, clears the screen first."""
     if clear:
         clear_screen()
-        render_fixed_header(compact=True, show_controls=True)
+        render_fixed_header(compact=True, show_controls=False)
     if RICH and console is not None:
         content = f"[bold]{title}[/bold]"
         if subtitle:
@@ -242,7 +242,7 @@ def render_stage(title: str, subtitle: str = "", border_style: str = "cyan", cle
 def pause(message: str = "Press Enter to continue") -> None:
     try:
         if RICH and Prompt is not None:
-            Prompt.ask(f"[dim]{message}[/dim]", default="")
+            Prompt.ask(f"[dim]{message}[/dim]", default="", show_default=False)
         else:
             input(message)
     except KeyboardInterrupt:
@@ -251,7 +251,8 @@ def pause(message: str = "Press Enter to continue") -> None:
 
 def prompt_str(message: str, default: Optional[str] = None, password: bool = False) -> str:
     if RICH and Prompt is not None:
-        res = Prompt.ask(message, default=default, password=password)
+        show_def = bool(default)
+        res = Prompt.ask(message, default=default, show_default=show_def, password=password)
         return (res or "").strip()
     suffix = f" [{default}]" if default else ""
     val = input(f"{message}{suffix}: ").strip()
@@ -341,7 +342,7 @@ def prompt_continue_nav(message: str = "Press Enter to continue", allow_back: bo
     """Enter continues; b/back returns to the previous step."""
     if RICH and Prompt is not None:
         label = message + (" [dim](b=back)[/dim]" if allow_back else "")
-        raw = Prompt.ask(label, default="")
+        raw = Prompt.ask(label, default="", show_default=False)
     else:
         raw = input(message + (" / b=back" if allow_back else "") + ": ").strip()
     if allow_back and is_back_value(str(raw)):
