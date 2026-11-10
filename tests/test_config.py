@@ -109,4 +109,13 @@ def test_config_manager_load_and_save_vless():
         assert updated_settings.workers == 20
 
 
+def test_make_vless_link_strips_trailing_dot_in_query():
+    raw = "vless://uuid@example.com:443?security=tls&sni=Static.Fox1.Org.&host=Static.Fox1.Org.&type=ws#Dot"
+    v = parse_vless(raw)
+    exported = make_vless_link(v, "104.16.1.1", 443, "Clean")
+    reparsed = parse_vless(exported)
+    assert reparsed.query["sni"] == "Static.Fox1.Org"
+    assert reparsed.query["host"] == "Static.Fox1.Org"
+
+
 

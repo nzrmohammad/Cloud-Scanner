@@ -71,3 +71,18 @@ def test_build_interval_index_overlap():
     assert _lookup_interval_index(250, ranges, starts, max_ends) is None
 
 
+def test_set_geoip_cache_dir_clears_memory_and_switches_path(monkeypatch, tmp_path):
+    from scanner import geoip
+
+    dir1 = tmp_path / "run1"
+    dir2 = tmp_path / "run2"
+    monkeypatch.setattr(geoip, "_GEOIP_CACHE", {"1.2.3.4": ("DE", "Berlin", "Org")})
+    monkeypatch.setattr(geoip, "_GEOIP_CACHE_TS", {"1.2.3.4": 100.0})
+    monkeypatch.setattr(geoip, "_GEOIP_CACHE_FILE", dir1 / "geoip_cache.json")
+
+    geoip.set_geoip_cache_dir(dir2)
+    assert geoip._GEOIP_CACHE_FILE == dir2 / "geoip_cache.json"
+    assert geoip._GEOIP_CACHE == {}
+    assert geoip._GEOIP_CACHE_TS == {}
+
+

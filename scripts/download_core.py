@@ -27,6 +27,7 @@ from scanner.xray import (  # noqa: E402
     fetch_latest_xray_tag,
     get_platform_asset_name,
     get_xray_version,
+    normalize_xray_tag,
 )
 
 try:
@@ -130,8 +131,7 @@ def main() -> int:
         print(f"Failed to resolve latest Xray-core release tag: {e}")
         print("\nTip: If GitHub is slow or blocked in your network, pass a proxy: python scripts/download_core.py -p http://127.0.0.1:10808")
         return 2
-    if tag and not tag.startswith("v"):
-        tag = f"v{tag}"
+    tag = normalize_xray_tag(tag)
     print(f"Target version: {tag}")
 
     download_url = f"https://github.com/XTLS/Xray-core/releases/download/{tag}/{asset_name}"

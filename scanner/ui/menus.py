@@ -151,7 +151,7 @@ def build_menu_renderable(
         help_lines.append(
             f"[bold]Space[/bold]=toggle  [bold]A[/bold]=all  [bold]N[/bold]=none  | Selected: [cyan]{len(selected)}/{total_items}[/cyan]"
         )
-        help_lines.append("[dim]Type # (1 | 1,3,5 | 1-20 | all) then Enter[/dim]")
+        help_lines.append("[dim]Type # (1 | 1,3,5 | 1-20) then Enter[/dim]")
     else:
         help_lines.append("[dim]Numeric shortcut: type item # then Enter[/dim]")
     if typed:

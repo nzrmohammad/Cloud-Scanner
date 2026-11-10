@@ -141,3 +141,12 @@ def test_xray_early_exit_raises_runtime_error_quickly(monkeypatch, tmp_path):
     assert elapsed < 1.0
     assert "code 23" in str(exc_info.value)
     assert "invalid tls config" in str(exc_info.value)
+
+
+def test_normalize_xray_tag_handles_numeric_and_v_prefix():
+    from scanner.xray import normalize_xray_tag
+
+    assert normalize_xray_tag("26.11.9") == "v26.11.9"
+    assert normalize_xray_tag("v26.3.27") == "v26.3.27"
+    assert normalize_xray_tag("") == ""
+    assert normalize_xray_tag(None) == ""

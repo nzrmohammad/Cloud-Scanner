@@ -367,7 +367,7 @@ class CloudScannerApp:
     def run_cli(self, args: argparse.Namespace) -> int:
         """Run non-interactive CLI mode."""
         if args.list_isps:
-            print_isp_catalog_cli()
+            print_isp_catalog_cli(cprint)
             return 0
 
         using_isp_cli = bool(args.isp_category)

@@ -753,7 +753,7 @@ def handle_post_scan_testing_tui(
     cfg = settings or AppSettings()
     def_samples = max(2, min(20, cfg.ping_samples))
     def_longevity = max(0, min(60, cfg.longevity_duration if cfg.longevity_test else 0))
-    def_dl = max(1, min(100, cfg.download_mb))
+    def_dl = max(0, min(100, cfg.download_mb))
     def_ul = max(0, min(50, cfg.upload_mb))
     def_speed_dur = max(1, min(60, cfg.speed_duration))
     def_workers = max(1, min(30, cfg.speed_workers or min(concurrency, 5)))
@@ -800,7 +800,7 @@ def handle_post_scan_testing_tui(
                 "Anti-Drop endurance duration (seconds)", max(5, def_longevity or 30), 5, 60, allow_back=True
             )
         if mode in ("full", "speed"):
-            speed_mb = prompt_int_nav("Download size per IP (MB)", def_dl, 1, 100, allow_back=True)
+            speed_mb = prompt_int_nav("Download size per IP (MB, 0 to skip)", def_dl, 0, 100, allow_back=True)
             upload_mb = prompt_int_nav("Upload size per IP (MB, 0 to skip)", def_ul, 0, 50, allow_back=True)
             speed_duration = prompt_int_nav("Speed test duration limit (seconds)", def_speed_dur, 1, 60, allow_back=True)
 

@@ -33,6 +33,8 @@ def set_geoip_cache_dir(output_dir: Optional[Path]) -> None:
     with _CACHE_LOCK:
         if target != _GEOIP_CACHE_FILE:
             _GEOIP_CACHE_FILE = target
+            _GEOIP_CACHE.clear()
+            _GEOIP_CACHE_TS.clear()
             _CACHE_LOADED = False
 _GEOIP_CACHE: Dict[str, Tuple[Optional[str], Optional[str], Optional[str]]] = {}
 _GEOIP_CACHE_TS: Dict[str, float] = {}
@@ -389,8 +391,14 @@ def resolve_ip_location(
     city: Optional[str] = None
     org: Optional[str] = None
 
+    # Fast local DB check for Cloudflare Anycast before hitting external HTTP APIs
+    local_cc = lookup_local_geoip(ip)
+    if local_cc == "CLOUDFLARE":
+        country, city, org = "US", "Anycast", "Cloudflare, Inc."
+        logger.debug("Resolved %s as Cloudflare Anycast from local geoip.dat", ip)
+
     # Primary provider: ipinfo.io
-    if _provider_available("ipinfo"):
+    if not country and _provider_available("ipinfo"):
         try:
             data, status = _fetch_json(f"https://ipinfo.io/{ip}/json", timeout=timeout, session=session)
             if data:
@@ -415,18 +423,11 @@ def resolve_ip_location(
             _record_provider_outcome("freeipapi", success=False)
             logger.debug("freeipapi lookup failed for %s: %s", ip, exc)
 
-    # Tertiary provider: Local geoip.dat database fallback (instant offline/blocked fallback)
-    if not country:
-        local_cc = lookup_local_geoip(ip)
-        if local_cc:
-            if local_cc == "CLOUDFLARE":
-                country = "US"
-                city = "Anycast"
-                org = "Cloudflare, Inc."
-            elif len(local_cc) == 2:
-                country = local_cc
-                city = "Local DB"
-            logger.debug("Resolved %s from local geoip.dat: country=%s", ip, country)
+    # Tertiary provider: Local geoip.dat country-code fallback (offline/blocked fallback)
+    if not country and local_cc and len(local_cc) == 2:
+        country = local_cc
+        city = "Local DB"
+        logger.debug("Resolved %s from local geoip.dat fallback: country=%s", ip, country)
 
     res = (country, city, org)
     if country:

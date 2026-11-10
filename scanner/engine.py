@@ -50,6 +50,7 @@ from scanner.targets import parse_ip_and_port
 from scanner.xray import (
     BatchXrayProcess,
     XrayProcess,
+    XrayStartupError,
     terminate_active_xray_processes,
 )
 
@@ -290,6 +291,9 @@ def test_ip(
                 if res is not None:
                     return res
                 last_error = err
+        except XrayStartupError as exc:
+            logger.warning("Xray startup failed for %s:%d: %s", ip, port, exc)
+            return ScanResult(ip=ip, port=port, ok=False, error=str(exc).split("\n", 1)[0][:160])
         except TimeoutError:
             last_error = "Xray SOCKS port did not start"
         except Exception as exc:
@@ -436,7 +440,7 @@ def speed_test_ip(
                     for burst_idx in range(num_bursts):
                         if abort_event is not None and abort_event.is_set():
                             break
-                        if time.perf_counter() >= burst_deadline - 0.2 and burst_speeds:
+                        if burst_idx > 0 and time.perf_counter() >= burst_deadline - 0.2:
                             break
                         try:
                             req_start = time.perf_counter()
@@ -969,6 +973,19 @@ def run_latency_scan(
             ev.set()
             terminate_active_xray_processes()
             raise ScanInterrupted(results, "scan") from exc
+        except XrayStartupError as exc:
+            logger.error("Fatal Xray startup error, aborting remaining scan chunks: %s", exc)
+            err_msg = str(exc).split("\n", 1)[0][:160]
+            for ep_ip, ep_port in target_pairs[i:]:
+                res = ScanResult(ip=ep_ip, port=ep_port, ok=False, error=err_msg)
+                results.append(res)
+                done += 1
+                if on_result:
+                    try:
+                        on_result(res, done, total)
+                    except Exception as cb_exc:
+                        logger.debug("on_result callback error in fatal scan abort: %s", cb_exc)
+            break
         except Exception as exc:
             logger.debug("BatchXrayProcess failed for scan chunk (%s), falling back to individual test_ip", exc)
             try:
@@ -1224,10 +1241,16 @@ def run_speed_stage(
     make_reporter: Optional[Callable[..., Any]] = None,
 ) -> List[ScanResult]:
     """Execute bandwidth download and upload benchmarking with optional UI reporter."""
-    up_text = f", {upload_mb}MB up" if upload_mb > 0 else ""
-    if on_stage:
-        on_stage("Testing Download & Upload Speed", f"Testing speed on {len(candidates)} endpoints ({download_mb}MB down{up_text})...", "magenta")
+    if download_mb <= 0 and upload_mb <= 0:
+        return candidates
     test_upload = upload_mb > 0
+    parts = []
+    if download_mb > 0:
+        parts.append(f"{download_mb}MB down")
+    if test_upload:
+        parts.append(f"{upload_mb}MB up")
+    if on_stage:
+        on_stage("Testing Download & Upload Speed", f"Testing speed on {len(candidates)} endpoints ({', '.join(parts)})...", "magenta")
     if make_reporter:
         with make_reporter("Speed Testing", len(candidates), mode="speed") as cb:
             return run_speed_tests(

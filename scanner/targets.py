@@ -2,7 +2,7 @@ import ipaddress
 import re
 from bisect import bisect_right
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Set, Tuple
+from typing import Callable, Dict, Iterable, List, Optional, Set, Tuple
 
 from scanner.constants import (
     MAX_DEFAULT_HOSTS,
@@ -420,13 +420,18 @@ def resolve_isp_files(category: str, names: Optional[List[str]]) -> List[Path]:
     return selected
 
 
-def print_isp_catalog_cli() -> None:
+def print_isp_catalog_cli(printer: Optional[Callable[[str, str], None]] = None) -> None:
     from scanner.constants import ISP_CATEGORIES
-    from scanner.ui.terminal import cprint
+
+    def _emit(msg: str, style: str = "") -> None:
+        if printer is not None:
+            printer(msg, style)
+        else:
+            print(msg)
 
     for category, label in ISP_CATEGORIES.items():
         files = list_isp_files(category)
-        cprint(f"\n{label}:", "bold cyan")
+        _emit(f"\n{label}:", "bold cyan")
         for path in files:
             count, preview = read_isp_stats(path)
-            cprint(f"  - {isp_display_name(path)} ({count} lines) {preview}")
+            _emit(f"  - {isp_display_name(path)} ({count} lines) {preview}", "")

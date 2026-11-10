@@ -13,7 +13,7 @@ import zipfile
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
-from scanner.constants import app_dir
+from scanner.constants import app_dir, clean_dns_host
 from scanner.logger import get_logger
 from scanner.models import VlessConfig
 
@@ -26,6 +26,18 @@ except ImportError:
 
 _ACTIVE_PROC_LOCK = threading.Lock()
 _ACTIVE_PROCESSES: Set["_BaseXrayProcess"] = set()
+
+
+class XrayStartupError(RuntimeError):
+    """Raised when the Xray binary exits with an error before opening SOCKS ports."""
+
+
+def normalize_xray_tag(tag: Optional[str]) -> str:
+    """Ensure an Xray-core release tag has a leading 'v' prefix when non-empty."""
+    cleaned = (tag or "").strip()
+    if cleaned and not cleaned.startswith("v"):
+        return f"v{cleaned}"
+    return cleaned
 
 
 def terminate_active_xray_processes() -> int:
@@ -328,11 +340,9 @@ def download_xray_release(
 
     try:
         asset_name = get_platform_asset_name()
-        resolved_tag = tag or fetch_latest_xray_tag(timeout=min(5.0, timeout), proxies=proxies)
+        resolved_tag = normalize_xray_tag(tag or fetch_latest_xray_tag(timeout=min(5.0, timeout), proxies=proxies))
         if not resolved_tag:
             return False, "Could not resolve latest Xray-core release tag from GitHub"
-        if not resolved_tag.startswith("v") and not resolved_tag[0].isdigit():
-            resolved_tag = f"v{resolved_tag}"
 
         download_url = f"https://github.com/XTLS/Xray-core/releases/download/{resolved_tag}/{asset_name}"
         terminate_active_xray_processes()
@@ -393,7 +403,7 @@ def vless_to_xray_outbound(v: VlessConfig, server_ip: str, port: Optional[int] =
     if flow:
         outbound["settings"]["vnext"][0]["users"][0]["flow"] = flow
 
-    sni = (q.get("sni") or q.get("servername") or q.get("serverName") or v.host).strip().rstrip(".")
+    sni = clean_dns_host(q.get("sni") or q.get("servername") or q.get("serverName") or v.host)
     fp = q.get("fp") or q.get("fingerprint") or "chrome"
     alpn = q.get("alpn", "")
 
@@ -418,7 +428,7 @@ def vless_to_xray_outbound(v: VlessConfig, server_ip: str, port: Optional[int] =
             if q.get("spx"):
                 outbound["streamSettings"][tls_key]["spiderX"] = q.get("spx")
 
-    host_header = (q.get("host") or q.get("authority") or sni).strip().rstrip(".")
+    host_header = clean_dns_host(q.get("host") or q.get("authority") or sni)
     path = q.get("path") or "/"
 
     if network == "ws":
@@ -565,7 +575,7 @@ class _BaseXrayProcess:
                         logger.debug("Could not read Xray stderr log %s: %s", err_path, exc)
                     msg = f"Xray exited early (code {rc}): {detail}" if detail else f"Xray exited early (code {rc})"
                     logger.warning("%s", msg)
-                    raise RuntimeError(msg)
+                    raise XrayStartupError(msg)
                 raise TimeoutError("Xray did not open SOCKS port(s) within timeout")
             return self
         except BaseException:

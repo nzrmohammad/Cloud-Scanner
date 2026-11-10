@@ -6,6 +6,7 @@ from scanner.constants import (
     DEFAULT_CONFIG_FILENAME,
     DEFAULT_CONFIG_TEMPLATE,
     app_dir,
+    clean_dns_host,
     format_host_port,
 )
 from scanner.logger import get_logger
@@ -53,6 +54,9 @@ def parse_vless(uri_or_file: str) -> VlessConfig:
 def make_vless_link(v: VlessConfig, server_ip: str, port: int, remark_extra: str = "") -> str:
     """Build a complete ready-to-import vless:// URI with clean IP, port, and remark."""
     query_params = dict(v.query)
+    for host_key in ("sni", "servername", "serverName", "host", "authority"):
+        if host_key in query_params and query_params[host_key]:
+            query_params[host_key] = clean_dns_host(query_params[host_key])
     q_str = urlencode(query_params, quote_via=quote)
     base_remark = v.remark or "CleanIP"
     endpoint = format_host_port(server_ip, port)

@@ -326,4 +326,46 @@ def test_enrich_results_with_colo_concurrent_fallback(monkeypatch, tmp_path):
     assert [r.colo for r in res] == ["FRA", "FRA", "FRA"]
 
 
+def test_run_latency_scan_aborts_fast_on_xray_startup_error(monkeypatch, tmp_path):
+    from scanner.engine import run_latency_scan
+    from scanner.models import VlessConfig
+    from scanner.xray import XrayStartupError
+
+    v = VlessConfig(uuid="dummy", host="test.com", port=443)
+    pairs = [(f"104.16.1.{i}", 443) for i in range(1, 26)]  # >1 chunk
+    calls = {"batch": 0, "fallback": 0}
+
+    class BrokenBatch:
+        def __init__(self, *args, **kwargs):
+            calls["batch"] += 1
+
+        def __enter__(self):
+            raise XrayStartupError("Xray exited early (code 23): invalid config")
+
+        def __exit__(self, *args):
+            pass
+
+    monkeypatch.setattr("scanner.engine.BatchXrayProcess", BrokenBatch)
+    monkeypatch.setattr(
+        "scanner.engine.test_ip",
+        lambda *a, **kw: calls.__setitem__("fallback", calls["fallback"] + 1) or ScanResult(ip="1.1.1.1"),
+    )
+
+    out = run_latency_scan(v, pairs, tmp_path / "xray", concurrency=2, timeout=2, tries=1)
+    assert len(out) == 25
+    assert all(not r.ok and "code 23" in r.error for r in out)
+    assert calls["batch"] == 1
+    assert calls["fallback"] == 0
+
+
+def test_run_speed_stage_skips_when_zero_sizes(tmp_path):
+    from scanner.engine import run_speed_stage
+    from scanner.models import VlessConfig
+
+    v = VlessConfig(uuid="dummy", host="test.com", port=443)
+    base = [ScanResult(ip="1.1.1.1", port=443, ok=True, latency_ms=20.0)]
+    out = run_speed_stage(v, base, tmp_path / "xray", workers=2, duration=5, timeout=5, download_mb=0, upload_mb=0)
+    assert out == base
+
+
 

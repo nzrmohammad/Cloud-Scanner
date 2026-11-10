@@ -32,6 +32,11 @@ SAFE_AUTO_EXPAND_LIMIT = 50_000
 SAFE_IPV6_AUTO_EXPAND_LIMIT = 2_000
 
 
+def clean_dns_host(value: Optional[str]) -> str:
+    """Trim whitespace and accidental trailing DNS root dot from host/SNI values."""
+    return (value or "").strip().rstrip(".")
+
+
 def format_host_port(host: str, port: int) -> str:
     """Format an IP/host and port, wrapping bare IPv6 literals in brackets."""
     clean = host.strip()
