@@ -153,6 +153,24 @@ def get_xray_version(xray_path: Optional[Path]) -> Optional[str]:
     return None
 
 
+_XRAY_VERSION_CACHE: Dict[Tuple[str, int], Optional[str]] = {}
+_WARNED_REMOVED_ALLOW_INSECURE: Set[str] = set()
+
+
+def _cached_xray_version(xray_path: Optional[Path]) -> Optional[str]:
+    """Return cached Xray version keyed by resolved path and mtime_ns."""
+    if not xray_path or not xray_path.exists():
+        return None
+    try:
+        resolved = xray_path.resolve()
+        key = (str(resolved), int(resolved.stat().st_mtime_ns))
+    except OSError:
+        return get_xray_version(xray_path)
+    if key not in _XRAY_VERSION_CACHE:
+        _XRAY_VERSION_CACHE[key] = get_xray_version(xray_path)
+    return _XRAY_VERSION_CACHE[key]
+
+
 def get_environment_status(xray_path: Optional[Path]) -> Dict[str, Any]:
     """Inspect environment files and dependencies headlessly."""
     geoip_file = find_asset("geoip.dat", xray_path)
@@ -373,7 +391,7 @@ def vless_to_xray_outbound(v: VlessConfig, server_ip: str, port: Optional[int] =
     if flow:
         outbound["settings"]["vnext"][0]["users"][0]["flow"] = flow
 
-    sni = q.get("sni") or q.get("servername") or q.get("serverName") or v.host
+    sni = (q.get("sni") or q.get("servername") or q.get("serverName") or v.host).strip().rstrip(".")
     fp = q.get("fp") or q.get("fingerprint") or "chrome"
     alpn = q.get("alpn", "")
 
@@ -398,7 +416,7 @@ def vless_to_xray_outbound(v: VlessConfig, server_ip: str, port: Optional[int] =
             if q.get("spx"):
                 outbound["streamSettings"][tls_key]["spiderX"] = q.get("spx")
 
-    host_header = q.get("host") or q.get("authority") or sni
+    host_header = (q.get("host") or q.get("authority") or sni).strip().rstrip(".")
     path = q.get("path") or "/"
 
     if network == "ws":
@@ -566,6 +584,38 @@ class _BaseXrayProcess:
                 logger.debug("Temp directory cleanup failed: %s", exc)
 
 
+def adapt_config_for_xray_version(cfg: Dict[str, Any], version: Optional[str]) -> Dict[str, Any]:
+    """Adapt generated Xray config for newer Xray-core releases (e.g. >= 26.4)."""
+    ver_tuple = parse_version_tuple(version or "")
+    if not ver_tuple or ver_tuple < (26, 4):
+        return cfg
+
+    for outbound in cfg.get("outbounds", []):
+        stream = outbound.get("streamSettings")
+        if not isinstance(stream, dict):
+            continue
+        for tls_key in ("tlsSettings", "realitySettings"):
+            tls_cfg = stream.get(tls_key)
+            if isinstance(tls_cfg, dict) and "allowInsecure" in tls_cfg:
+                was_insecure = bool(tls_cfg.pop("allowInsecure"))
+                if was_insecure and version and version not in _WARNED_REMOVED_ALLOW_INSECURE:
+                    _WARNED_REMOVED_ALLOW_INSECURE.add(version)
+                    logger.warning(
+                        "Xray %s removed 'allowInsecure'; omitting it so Xray can start with standard TLS checks.",
+                        version,
+                    )
+        ws_cfg = stream.get("wsSettings")
+        if isinstance(ws_cfg, dict):
+            headers = ws_cfg.get("headers")
+            if isinstance(headers, dict) and "Host" in headers:
+                host_val = str(headers.pop("Host")).strip().rstrip(".")
+                if host_val and "host" not in ws_cfg:
+                    ws_cfg["host"] = host_val
+                if not headers:
+                    ws_cfg.pop("headers", None)
+    return cfg
+
+
 class XrayProcess(_BaseXrayProcess):
     """Context manager to run and automatically terminate an Xray instance cleanly."""
 
@@ -588,13 +638,14 @@ class XrayProcess(_BaseXrayProcess):
         self.socks_port = free_port()
 
     def _build_config(self) -> Dict[str, Any]:
-        return make_xray_config(
+        cfg = make_xray_config(
             self.vless_config,
             self.server_ip,
             self.socks_port,
             self.loglevel,
             port=self.port,
         )
+        return adapt_config_for_xray_version(cfg, _cached_xray_version(self.xray_path))
 
     def _ready_ports(self) -> List[int]:
         return [self.socks_port]
@@ -629,11 +680,12 @@ class BatchXrayProcess(_BaseXrayProcess):
         self.endpoint_ports = [(ip, p, sp) for (ip, p), sp in zip(endpoints, allocated)]
 
     def _build_config(self) -> Dict[str, Any]:
-        return make_batch_xray_config(
+        cfg = make_batch_xray_config(
             self.vless_config,
             self.endpoint_ports,
             self.loglevel,
         )
+        return adapt_config_for_xray_version(cfg, _cached_xray_version(self.xray_path))
 
     def _ready_ports(self) -> List[int]:
         return [sp for _, _, sp in self.endpoint_ports]

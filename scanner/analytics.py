@@ -1,3 +1,4 @@
+from collections import Counter
 from typing import Callable, List, Optional, Tuple
 
 from scanner.config import make_vless_link
@@ -251,3 +252,48 @@ def get_smart_recommendations(
             )
 
     return recs
+
+
+def _classify_scan_error(error: str) -> str:
+    """Group verbose urllib3/requests/Xray error strings into clear diagnostic buckets."""
+    err = (error or "").strip()
+    if not err:
+        return "Unknown failure"
+    low = err.lower()
+    if "xray did not open" in low or "failed to start" in low:
+        return "Xray failed to start (check VLESS params / Xray version)"
+    if "403 forbidden" in low or "bad handshake" in low:
+        return "WebSocket handshake rejected (403 / bad handshake)"
+    if "certificate_verify_failed" in low or "failed to verify certificate" in low:
+        return "TLS certificate mismatch (IP not serving your SNI)"
+    if "unexpected_eof_while_reading" in low or "ssleoferror" in low or "sslerror" in low:
+        return "TLS/Proxy stream closed unexpectedly (SSLEOFError)"
+    if "read timed out" in low or "timed out" in low or "timeout" in low:
+        return "Timed out waiting for response"
+    if any(k in low for k in ("connection aborted", "connection reset", "remotedisconnected", "connectionrefused")):
+        return "Connection reset / aborted by remote host"
+    return err.splitlines()[0][:80]
+
+
+def summarize_failure_diagnostics(results: List[ScanResult]) -> Tuple[List[Tuple[str, int]], List[str]]:
+    """Summarize dominant failure causes and actionable troubleshooting hints for failed scans."""
+    failed = [r for r in results if not r.ok]
+    if not failed:
+        return [], []
+
+    counts: Counter[str] = Counter(_classify_scan_error(r.error) for r in failed)
+    top_reasons = counts.most_common(5)
+    labels_joined = " ".join(label.lower() for label, _ in top_reasons)
+
+    hints: List[str] = []
+    if any(k in labels_joined for k in ("ssleoferror", "connection reset", "timed out")):
+        hints.append("Verify your base VLESS URI/UUID is active in a VPN client (expired/blocked accounts fail all IPs).")
+        hints.append("Disable any active VPN / TUN adapter (Fake-IP DNS) before scanning so traffic uses your ISP.")
+    if any(k in labels_joined for k in ("certificate mismatch", "403", "ssleoferror")):
+        hints.append("Confirm the scanned IP/CIDR belongs to Cloudflare/your CDN and check SNI / Host parameters.")
+    if "xray failed to start" in labels_joined:
+        hints.append("Check results/scanner.log and VLESS parameters (Xray >= 26.4 removed allowInsecure=1).")
+    if not hints:
+        hints.append("Inspect results/scanner.log for detailed per-endpoint error messages.")
+
+    return top_reasons, hints

@@ -7,6 +7,7 @@ from scanner.analytics import (
     latency_sort_key,
     longevity_sort_key,
     recheck_sort_key,
+    summarize_failure_diagnostics,
 )
 from scanner.models import ScanResult, VlessConfig
 
@@ -80,3 +81,16 @@ def test_smart_recommendations_prefers_sustained_and_sorted_fallbacks():
     by_cat = {rec.category: rec.result.ip for rec in recs}
     assert by_cat["Gaming"] == "1.1.1.2"
     assert by_cat["Streaming"] == "1.1.1.3"
+
+
+def test_summarize_failure_diagnostics():
+    results = [
+        ScanResult(ip="1.1.1.1", ok=False, error="SSLError(SSLEOFError(8, '[SSL: UNEXPECTED_EOF_WHILE_READING]'))"),
+        ScanResult(ip="1.1.1.2", ok=False, error="SSLError(SSLEOFError(8, '[SSL: UNEXPECTED_EOF_WHILE_READING]'))"),
+        ScanResult(ip="1.1.1.3", ok=False, error="Read timed out. (read timeout=3)"),
+    ]
+    reasons, hints = summarize_failure_diagnostics(results)
+    assert reasons[0][1] == 2
+    assert "SSLEOFError" in reasons[0][0]
+    assert reasons[1][1] == 1
+    assert any("VLESS" in h for h in hints)

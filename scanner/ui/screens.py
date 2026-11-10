@@ -7,6 +7,7 @@ from scanner.analytics import (
     full_sort_key,
     get_smart_recommendations,
     output_sort_key,
+    summarize_failure_diagnostics,
 )
 from scanner.config import load_saved_vless_config, parse_vless, save_vless_config
 from scanner.constants import (
@@ -543,6 +544,19 @@ def show_final_results(
         if max_latency_ms > 0 or min_speed_mbps > 0:
             filter_line = f"\nFiltered out: [bold yellow]{filtered_out}[/bold yellow]"
         console.print(Panel(f"[bold green]Scan Finished[/bold green]\n\nWorking Endpoints: [bold green]{len(ok)}[/bold green]\nFailed Endpoints: [bold red]{failed}[/bold red]{filter_line}", border_style="green", expand=False))
+        if not ok and failed > 0:
+            reasons, hints = summarize_failure_diagnostics(results)
+            reason_lines = "\n".join(f"- [red]{count}x[/red] {label}" for label, count in reasons)
+            hint_lines = "\n".join(f"• {hint}" for hint in hints)
+            console.print(
+                Panel(
+                    f"[bold yellow]No working endpoints found.[/bold yellow]\n\n[bold]Top failure reasons:[/bold]\n{reason_lines}\n\n[bold]Troubleshooting:[/bold]\n{hint_lines}",
+                    title="Failure Breakdown",
+                    border_style="yellow",
+                    expand=False,
+                )
+            )
+            return
         title_txt = f"Best Results (Showing {min(len(ok), display_limit)} of {len(ok)})" if len(ok) > display_limit else "Best Results"
         table = Table(title=title_txt, box=box.ROUNDED, border_style="cyan", expand=False, pad_edge=False)
         if len(ok) > display_limit:
@@ -660,6 +674,14 @@ def show_final_results(
         render_smart_recommendations(recs, output_dir)
     else:
         print(f"\nScan Finished | Working: {len(ok)} | Failed: {failed} | Filtered: {filtered_out}")
+        if not ok and failed > 0:
+            reasons, hints = summarize_failure_diagnostics(results)
+            print("Failure Breakdown:")
+            for label, count in reasons:
+                print(f"  - {count}x {label}")
+            for hint in hints:
+                print(f"  * {hint}")
+            return
         for i, r in enumerate(display_items, 1):
             loc_str = f" loc={format_ip_location(r.ip_country, r.ip_city)}" if r.ip_country else ""
             colo_str = f" colo={format_cf_colo(r.colo, short=True)}" if r.colo else ""

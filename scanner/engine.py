@@ -1001,6 +1001,7 @@ def run_scan(
     on_message: Optional[Callable[[str, str], None]] = None,
     make_reporter: Optional[Callable[..., Any]] = None,
     on_prefilter_progress: Optional[Callable[[int, int, int], None]] = None,
+    make_tcp_reporter: Optional[Callable[[int], Any]] = None,
 ) -> List[ScanResult]:
     """Execute complete initial scan across targets and ports in a headless, decoupled pipeline."""
     target_pairs: List[Tuple[str, int]] = []
@@ -1022,12 +1023,29 @@ def run_scan(
     if use_tcp_prefilter and len(target_pairs) > 1:
         if on_stage:
             on_stage("Fast TCP Pre-filter", f"Testing TCP connectivity on {len(target_pairs)} candidate endpoints...", "cyan")
-        alive = fast_tcp_filter(
-            target_pairs,
-            timeout=min(1.5, float(timeout)),
-            workers=min(30, max(10, concurrency)),
-            on_progress=on_prefilter_progress,
-        )
+        tcp_workers = min(30, max(10, concurrency))
+        tcp_timeout = min(1.5, float(timeout))
+        if make_tcp_reporter:
+            with make_tcp_reporter(len(target_pairs)) as ui_tcp_cb:
+                def _combined_tcp_cb(done: int, total_items: int, alive_count: int) -> None:
+                    if ui_tcp_cb:
+                        ui_tcp_cb(done, total_items, alive_count)
+                    if on_prefilter_progress:
+                        on_prefilter_progress(done, total_items, alive_count)
+
+                alive = fast_tcp_filter(
+                    target_pairs,
+                    timeout=tcp_timeout,
+                    workers=tcp_workers,
+                    on_progress=_combined_tcp_cb,
+                )
+        else:
+            alive = fast_tcp_filter(
+                target_pairs,
+                timeout=tcp_timeout,
+                workers=tcp_workers,
+                on_progress=on_prefilter_progress,
+            )
         if alive:
             if on_message:
                 on_message(f"TCP pre-filter passed: {len(alive)} / {len(target_pairs)} endpoints", "green")
@@ -1368,6 +1386,8 @@ class ScannerEngine:
         on_stage: Optional[Callable[[str, str, str], None]] = None,
         on_message: Optional[Callable[[str, str], None]] = None,
         make_reporter: Optional[Callable[[str, int, str], Any]] = None,
+        on_prefilter_progress: Optional[Callable[[int, int, int], None]] = None,
+        make_tcp_reporter: Optional[Callable[[int], Any]] = None,
     ) -> List[ScanResult]:
         if not self.xray_path:
             raise FileNotFoundError("Xray executable not found")
@@ -1384,6 +1404,8 @@ class ScannerEngine:
             on_stage=on_stage,
             on_message=on_message,
             make_reporter=make_reporter,
+            on_prefilter_progress=on_prefilter_progress,
+            make_tcp_reporter=make_tcp_reporter,
         )
 
     def recheck(

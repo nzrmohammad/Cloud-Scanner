@@ -1,7 +1,7 @@
 import argparse
 import sys
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 from scanner.analytics import get_smart_recommendations
 from scanner.config import ConfigManager, load_saved_vless_config, parse_vless, save_vless_config
@@ -95,6 +95,48 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--isp", nargs="*", help="ISP names/stems to use from --isp-category, or all")
     p.add_argument("--sample-large-ranges", action="store_true", help="Evenly sample ranges when selected targets exceed a positive --max-hosts value")
     return p
+
+
+def _run_scan_with_tracking(
+    v: VlessConfig,
+    targets: List[str],
+    ports: List[int],
+    xray: Path,
+    concurrency: int,
+    timeout: int,
+    tries: int,
+    url: str,
+    loglevel: str,
+    use_tcp_prefilter: bool,
+    output_dir: Path,
+    total_endpoints: int,
+) -> Tuple[List[ScanResult], int]:
+    """Run initial scan with decoupled stage reporters while tracking TCP-alive count."""
+    tcp_alive_count = total_endpoints if (not use_tcp_prefilter or total_endpoints <= 1) else 0
+
+    def _track_tcp_alive(_done: int, _total_items: int, alive_count: int) -> None:
+        nonlocal tcp_alive_count
+        tcp_alive_count = alive_count
+
+    results = run_scan(
+        v,
+        targets,
+        ports,
+        xray,
+        concurrency,
+        timeout,
+        tries,
+        url,
+        loglevel,
+        use_tcp_prefilter=use_tcp_prefilter,
+        output_dir=output_dir,
+        on_stage=render_stage,
+        on_message=cprint,
+        make_reporter=progress_reporter,
+        on_prefilter_progress=_track_tcp_alive,
+        make_tcp_reporter=tcp_prefilter_reporter,
+    )
+    return results, tcp_alive_count
 
 
 class CloudScannerApp:
@@ -224,31 +266,21 @@ class CloudScannerApp:
                     except NavigationBack:
                         break
 
-                    tcp_alive_count = total_endpoints if not settings.tcp_prefilter else 0
                     try:
-                        with tcp_prefilter_reporter(total_endpoints) as tcp_cb:
-                            def _tracked_tcp_cb(done: int, total_items: int, alive_count: int) -> None:
-                                nonlocal tcp_alive_count
-                                tcp_alive_count = alive_count
-                                tcp_cb(done, total_items, alive_count)
-
-                            results = run_scan(
-                                v,
-                                targets,
-                                ports,
-                                xray,
-                                settings.workers,
-                                settings.timeout,
-                                1,
-                                settings.test_url,
-                                "warning",
-                                use_tcp_prefilter=settings.tcp_prefilter,
-                                output_dir=output_dir,
-                                on_stage=render_stage,
-                                on_message=cprint,
-                                make_reporter=progress_reporter,
-                                on_prefilter_progress=_tracked_tcp_cb,
-                            )
+                        results, tcp_alive_count = _run_scan_with_tracking(
+                            v=v,
+                            targets=targets,
+                            ports=ports,
+                            xray=xray,
+                            concurrency=settings.workers,
+                            timeout=settings.timeout,
+                            tries=1,
+                            url=settings.test_url,
+                            loglevel="warning",
+                            use_tcp_prefilter=settings.tcp_prefilter,
+                            output_dir=output_dir,
+                            total_endpoints=total_endpoints,
+                        )
                         txt, csvp = save_results(results, output_dir, "clean_ips", vless_config=v)
                         render_stage("Scan Results", "Latency scan finished. Results are saved below.", "green")
                     except ScanInterrupted as interrupted:
@@ -361,31 +393,21 @@ class CloudScannerApp:
             return 2
 
         total_prefilter = len(targets) * len(ports)
-        tcp_alive_count = total_prefilter if not use_tcp_prefilter else 0
         try:
-            with tcp_prefilter_reporter(total_prefilter) as tcp_cb:
-                def _tracked_cli_tcp(done: int, total_items: int, alive_count: int) -> None:
-                    nonlocal tcp_alive_count
-                    tcp_alive_count = alive_count
-                    tcp_cb(done, total_items, alive_count)
-
-                results = run_scan(
-                    v,
-                    targets,
-                    ports,
-                    xray,
-                    args.concurrency,
-                    args.timeout,
-                    args.tries,
-                    args.url,
-                    args.loglevel,
-                    use_tcp_prefilter=use_tcp_prefilter,
-                    output_dir=out_dir,
-                    on_stage=render_stage,
-                    on_message=cprint,
-                    make_reporter=progress_reporter,
-                    on_prefilter_progress=_tracked_cli_tcp,
-                )
+            results, tcp_alive_count = _run_scan_with_tracking(
+                v=v,
+                targets=targets,
+                ports=ports,
+                xray=xray,
+                concurrency=args.concurrency,
+                timeout=args.timeout,
+                tries=args.tries,
+                url=args.url,
+                loglevel=args.loglevel,
+                use_tcp_prefilter=use_tcp_prefilter,
+                output_dir=out_dir,
+                total_endpoints=total_prefilter,
+            )
             txt, csvp = save_results(results, out_dir, "clean_ips", vless_config=v)
         except ScanInterrupted as interrupted:
             results = interrupted.results

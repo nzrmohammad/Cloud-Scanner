@@ -150,10 +150,18 @@ def clear_screen() -> None:
     if os.name == "nt" and (not RICH or console is None or getattr(console, "legacy_windows", False)):
         if _win32_clear_console_buffer():
             return
-    if sys.stdout.isatty():
+    real_stdout = getattr(sys, "__stdout__", None)
+    tty_out = sys.stdout if sys.stdout.isatty() else (
+        real_stdout
+        if real_stdout is not None
+        and real_stdout.isatty()
+        and hasattr(sys.stdout, "rich_proxied_file")
+        else None
+    )
+    if tty_out is not None:
         try:
-            sys.stdout.write("\033[2J\033[3J\033[H")
-            sys.stdout.flush()
+            tty_out.write("\033[2J\033[3J\033[H")
+            tty_out.flush()
             return
         except Exception:
             pass

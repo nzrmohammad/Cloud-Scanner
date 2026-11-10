@@ -74,3 +74,31 @@ def test_fetch_latest_xray_tag_head_and_fallback(monkeypatch):
     monkeypatch.setattr(requests, "head", raise_err)
     monkeypatch.setattr(requests, "get", raise_err)
     assert fetch_latest_xray_tag(timeout=1.0) is None
+
+
+def test_vless_strips_trailing_dot_from_sni_and_host():
+    raw = "vless://uuid@example.com:443?security=tls&sni=Static.Fox1.Org.&type=ws&host=Static.Fox1.Org.&path=%2Fws#Dot"
+    v = parse_vless(raw)
+    outbound = vless_to_xray_outbound(v, "1.1.1.1", port=443)
+    assert outbound["streamSettings"]["tlsSettings"]["serverName"] == "Static.Fox1.Org"
+    assert outbound["streamSettings"]["wsSettings"]["headers"]["Host"] == "Static.Fox1.Org"
+
+
+def test_adapt_config_for_xray_version():
+    from scanner.xray import adapt_config_for_xray_version
+
+    v_insecure = parse_vless("vless://uuid@example.com:443?security=tls&allowInsecure=1&sni=example.com.&type=ws&host=example.com.&path=%2Fws#Test")
+    base_cfg = make_xray_config(v_insecure, "1.1.1.1", 10808)
+
+    # Legacy version retains allowInsecure and headers.Host
+    legacy_cfg = adapt_config_for_xray_version(make_xray_config(v_insecure, "1.1.1.1", 10808), "26.3.27")
+    assert legacy_cfg["outbounds"][0]["streamSettings"]["tlsSettings"]["allowInsecure"] is True
+    assert legacy_cfg["outbounds"][0]["streamSettings"]["wsSettings"]["headers"]["Host"] == "example.com"
+
+    # Modern Xray >= 26.4 drops removed allowInsecure and migrates wsSettings Host -> host
+    modern_cfg = adapt_config_for_xray_version(base_cfg, "26.11.9")
+    tls_settings = modern_cfg["outbounds"][0]["streamSettings"]["tlsSettings"]
+    ws_settings = modern_cfg["outbounds"][0]["streamSettings"]["wsSettings"]
+    assert "allowInsecure" not in tls_settings
+    assert ws_settings["host"] == "example.com"
+    assert "headers" not in ws_settings
