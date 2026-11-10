@@ -231,3 +231,52 @@ def test_save_results_zero_working_vs_filtered(tmp_path):
     txt2, _ = save_results(ok_slow, tmp_path, "clean_ips_filtered", max_latency_ms=100.0)
     assert "No results matched the selected filters." in txt2.read_text(encoding="utf-8")
 
+
+def test_save_results_recheck_longevity_keeps_jitter_and_loss(tmp_path):
+    res = ScanResult(
+        ip="104.16.1.1",
+        port=443,
+        ok=True,
+        latency_ms=120.0,
+        jitter_ms=12.3,
+        packet_loss=5.0,
+        sustained=True,
+    )
+    txt, csv_file = save_results([res], tmp_path, "clean_ips_longevity")
+    csv_lines = csv_file.read_text(encoding="utf-8").splitlines()
+    assert len(csv_lines) == 2
+    assert "jitter_ms" in csv_lines[0]
+    assert "packet_loss_pct" in csv_lines[0]
+    assert "anti_drop_sustained" in csv_lines[0]
+    assert "12.3" in csv_lines[1]
+    assert "True" in csv_lines[1]
+
+    txt_content = txt.read_text(encoding="utf-8")
+    assert "104.16.1.1" in txt_content
+    assert "12.3" in txt_content
+
+
+def test_save_results_recheck_upload_only_keeps_full_columns(tmp_path):
+    res = ScanResult(
+        ip="104.16.1.2",
+        port=443,
+        ok=True,
+        latency_ms=110.0,
+        jitter_ms=8.4,
+        packet_loss=0.0,
+        upload_mbps=14.5,
+    )
+    txt, csv_file = save_results([res], tmp_path, "clean_ips_speed_tested")
+    csv_lines = csv_file.read_text(encoding="utf-8").splitlines()
+    assert len(csv_lines) == 2
+    assert "jitter_ms" in csv_lines[0]
+    assert "packet_loss_pct" in csv_lines[0]
+    assert "upload_mbps" in csv_lines[0]
+    assert "8.4" in csv_lines[1]
+    assert "14.50" in csv_lines[1]
+
+    txt_content = txt.read_text(encoding="utf-8")
+    assert "104.16.1.2" in txt_content
+    assert "14.5" in txt_content
+
+

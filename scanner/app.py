@@ -327,6 +327,7 @@ class CloudScannerApp:
                         total_targets_count=total_endpoints,
                         tcp_alive_count=tcp_alive_count,
                         recommendations=recs,
+                        initial_ok_count=len(working_results),
                     )
 
                     self.last_results = final_results

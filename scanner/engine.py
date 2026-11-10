@@ -992,12 +992,16 @@ def run_latency_scan(
                 break
             logger.debug("BatchXrayProcess failed for scan chunk (%s), falling back to individual test_ip", exc)
             try:
+                def _on_chunk_result(r: ScanResult, _d: int, _t: int, base_done: int = done) -> None:
+                    if on_result:
+                        on_result(r, base_done + _d, total)
+
                 chunk_res = _run_concurrent_tasks(
                     chunk,
                     lambda p: test_ip(v, p[0], p[1], xray, timeout, tries, url, loglevel, abort_event=ev),
                     min(concurrency, len(chunk)),
                     "scan",
-                    on_result=lambda r, _d, _t: on_result(r, done + _d, total) if on_result else None,
+                    on_result=_on_chunk_result if on_result else None,
                     abort_event=ev,
                     prior_results=results,
                 )

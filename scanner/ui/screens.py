@@ -4,6 +4,7 @@ from typing import Any, List, Optional, Tuple
 
 from scanner.analytics import (
     apply_result_filters,
+    detect_stage_flags,
     full_sort_key,
     get_smart_recommendations,
     output_sort_key,
@@ -94,7 +95,14 @@ def _run_xray_download_flow(target_dir: Path, tag: Optional[str] = None) -> bool
         cprint(f"\n[cyan]Downloading Xray-core into {target_dir}...[/cyan]")
         if RICH and console is not None:
             try:
-                from rich.progress import BarColumn, DownloadColumn, Progress, TextColumn, TimeRemainingColumn, TransferSpeedColumn
+                from rich.progress import (
+                    BarColumn,
+                    DownloadColumn,
+                    Progress,
+                    TextColumn,
+                    TimeRemainingColumn,
+                    TransferSpeedColumn,
+                )
 
                 with Progress(
                     TextColumn("[bold cyan]{task.description}"),
@@ -106,11 +114,11 @@ def _run_xray_download_flow(target_dir: Path, tag: Optional[str] = None) -> bool
                 ) as progress:
                     task_id = progress.add_task("Xray-core", total=None)
 
-                    def _on_prog(dl: int, total: int) -> None:
+                    def _on_prog(dl: int, total: int, tid: Any = task_id, prog: Any = progress) -> None:
                         if total > 0:
-                            progress.update(task_id, total=total, completed=dl)
+                            prog.update(tid, total=total, completed=dl)
                         else:
-                            progress.update(task_id, completed=dl)
+                            prog.update(tid, completed=dl)
 
                     ok, msg = download_xray_release(target_dir, tag=tag, proxies=proxies, on_progress=_on_prog)
             except Exception as exc:
@@ -536,10 +544,7 @@ def show_final_results(
     save_recommendations: bool = True,
 ) -> None:
     ok = apply_result_filters(results, max_latency_ms=max_latency_ms, min_speed_mbps=min_speed_mbps)
-    is_full = "full" in filename_prefix or any(r.jitter_ms is not None and r.speed_mbps is not None for r in ok)
-    is_speed = "speed" in filename_prefix and not is_full
-    is_recheck = "rechecked" in filename_prefix and not is_full
-    is_longevity = "longevity" in filename_prefix and not is_full
+    is_full, is_speed, is_recheck, is_longevity = detect_stage_flags(filename_prefix, ok)
     sort_fn = full_sort_key if is_full else output_sort_key(filename_prefix)
     ok = sorted(ok, key=sort_fn)
     failed = len([r for r in results if not r.ok])

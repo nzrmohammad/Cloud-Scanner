@@ -753,8 +753,8 @@ class BatchXrayProcess(_BaseXrayProcess):
         self.vless_config = vless_config
         self.endpoints = endpoints
         self.loglevel = loglevel
-        allocated = free_ports(len(endpoints))
-        self.endpoint_ports = [(ip, p, sp) for (ip, p), sp in zip(endpoints, allocated)]
+        self.endpoint_ports: List[Tuple[str, int, int]] = []
+        self._reallocate_ports()
 
     def _build_config(self) -> Dict[str, Any]:
         cfg = make_batch_xray_config(
@@ -769,7 +769,7 @@ class BatchXrayProcess(_BaseXrayProcess):
 
     def _reallocate_ports(self) -> None:
         allocated = free_ports(len(self.endpoints))
-        self.endpoint_ports = [(ip, p, sp) for (ip, p), sp in zip(self.endpoints, allocated)]
+        self.endpoint_ports = [(ip, p, sp) for (ip, p), sp in zip(self.endpoints, allocated, strict=True)]
 
     def get_proxies_for_endpoint(self, ip: str, port: int) -> Optional[Dict[str, str]]:
         for ep_ip, ep_port, socks_port in self.endpoint_ports:

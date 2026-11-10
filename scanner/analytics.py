@@ -297,3 +297,19 @@ def summarize_failure_diagnostics(results: List[ScanResult]) -> Tuple[List[Tuple
         hints.append("Inspect results/scanner.log for detailed per-endpoint error messages.")
 
     return top_reasons, hints
+
+
+def detect_stage_flags(filename_prefix: str, ok: List[ScanResult]) -> Tuple[bool, bool, bool, bool]:
+    """Determine (is_full, is_speed, is_recheck, is_longevity) display/export mode flags."""
+    has_jitter = any(r.jitter_ms is not None for r in ok)
+    has_speed = any(r.speed_mbps is not None or r.upload_mbps is not None for r in ok)
+    has_longevity = any(r.sustained is not None for r in ok)
+    is_full = (
+        "full" in filename_prefix
+        or (has_jitter and has_speed)
+        or (has_jitter and has_longevity)
+    )
+    is_speed = "speed" in filename_prefix and not is_full
+    is_recheck = "rechecked" in filename_prefix and not is_full
+    is_longevity = "longevity" in filename_prefix and not is_full
+    return is_full, is_speed, is_recheck, is_longevity

@@ -3,7 +3,12 @@ from datetime import datetime
 from pathlib import Path
 from typing import List, Optional, Tuple
 
-from scanner.analytics import apply_result_filters, full_sort_key, output_sort_key
+from scanner.analytics import (
+    apply_result_filters,
+    detect_stage_flags,
+    full_sort_key,
+    output_sort_key,
+)
 from scanner.config import make_vless_link
 from scanner.constants import APP_CHANNEL, APP_VERSION, format_cf_colo
 from scanner.geoip import format_ip_location
@@ -113,10 +118,7 @@ def save_results(
     """Save results with independent ordering per stage and support per-port separation."""
     output_dir.mkdir(parents=True, exist_ok=True)
     ok = apply_result_filters(results, max_latency_ms=max_latency_ms, min_speed_mbps=min_speed_mbps)
-    is_full = "full" in filename_prefix or any(r.jitter_ms is not None and r.speed_mbps is not None for r in ok)
-    is_speed = "speed" in filename_prefix and not is_full
-    is_recheck = "rechecked" in filename_prefix and not is_full
-    is_longevity = "longevity" in filename_prefix and not is_full
+    is_full, is_speed, is_recheck, is_longevity = detect_stage_flags(filename_prefix, ok)
 
     sort_fn = full_sort_key if is_full else output_sort_key(filename_prefix)
     ok = sorted(ok, key=sort_fn)
