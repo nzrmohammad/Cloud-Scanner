@@ -41,11 +41,28 @@ def read_key() -> str:
         ch = sys.stdin.read(1)
         if ch == "\x1b":
             seq = ""
-            for _ in range(2):
-                r, _, _ = select.select([sys.stdin], [], [], 0.05)
-                if r:
-                    seq += sys.stdin.read(1)
-            return {"[A": "up", "[B": "down", "[D": "left", "[C": "right"}.get(seq, "esc")
+            # Read full CSI/SS3 escape sequence (up to 4 bytes, e.g. '[5~' for PgUp)
+            for _ in range(4):
+                r, _, _ = select.select([sys.stdin], [], [], 0.03)
+                if not r:
+                    break
+                nxt = sys.stdin.read(1)
+                seq += nxt
+                if nxt.isalpha() or nxt == "~":
+                    break
+            return {
+                "[A": "up",
+                "[B": "down",
+                "[D": "left",
+                "[C": "right",
+                "[5~": "page_up",
+                "[6~": "page_down",
+                "[H": "home",
+                "[1~": "home",
+                "[F": "end",
+                "[4~": "end",
+                "[3~": "delete",
+            }.get(seq, "esc" if not seq else "")
         if ch in {"\r", "\n"}:
             return "enter"
         if ch in {"\x7f", "\b"}:

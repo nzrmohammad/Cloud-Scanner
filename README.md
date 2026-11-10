@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/banner.jpg" alt="Cloud Scanner Hero Banner" width="100%" />
+</p>
+
 # 🌐 Cloud Scanner
 
 <p align="center">
@@ -188,19 +192,19 @@ You can edit `config.txt` to customize default behavior:
 | :--- | :--- | :--- |
 | `vless` | *(empty)* | Your complete `vless://...` configuration link. |
 | `ports` | `443, 8443, 2053, 2083, 2087, 2096` | Ports to scan, or `config` to scan only the port in the link. |
-| `workers` | `25` | Concurrency workers for scanning (optimized for socket stability). |
-| `timeout` | `2` | Connection timeout in seconds. |
+| `workers` | `30` | Concurrency workers for scanning (optimized for socket stability). |
+| `timeout` | `3` | Connection timeout in seconds. |
 | `tcp_prefilter` | `true` | Ultra-fast TCP pre-filter handshake before Xray tests. |
-| `max_targets` | `0` | Maximum target IPs to load (`0` = unlimited). |
+| `max_targets` | `2000` | Maximum target IPs to load (`0` = unlimited, `2000` safely samples huge ranges). |
 | `post_scan_mode` | `full` | Post-scan quality testing: `full`, `stability`, `longevity`, `speed`, or `none`. |
 | `top_targets` | `30` | Number of best-performing endpoints to test for speed/jitter (`0` or `all` = test ALL working IPs). |
 | `ping_samples` | `8` | Pings per endpoint for stability (packet loss & RFC jitter). |
 | `longevity_test` | `true` | Anti-Drop endurance test (sustained continuous streaming against DPI drops). |
 | `longevity_duration` | `30` | Anti-Drop test duration in seconds (continuous stream). |
-| `download_mb` | `5` | Download speed test size in megabytes (adaptively scaled based on warmup). |
+| `download_mb` | `3` | Download speed test size in megabytes (adaptively scaled based on warmup). |
 | `upload_mb` | `1` | Upload speed test size in megabytes (`0` to skip). |
 | `speed_duration` | `5` | Speed test timeout per IP in seconds. |
-| `speed_workers` | `5` | Concurrency workers for speed testing. |
+| `speed_workers` | `6` | Concurrency workers for speed testing. |
 
 ---
 

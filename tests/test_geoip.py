@@ -54,4 +54,19 @@ def test_lookup_local_geoip():
         assert isinstance(ir_code, str)
         assert len(ir_code) >= 2
 
+        # Nested overlapping CIDR check (1.18.128.0/24 CN inside 1.16.0.0/14 KR)
+        assert lookup_local_geoip("1.18.129.0") == "KR"
+        # IPv6 local DB support
+        assert lookup_local_geoip("2606:4700::1") is not None
+
+
+def test_build_interval_index_overlap():
+    from scanner.geoip import _build_interval_index, _lookup_interval_index
+
+    raw = [(100, 200, "KR"), (120, 150, "CN")]
+    ranges, starts, max_ends = _build_interval_index(raw)
+    assert _lookup_interval_index(130, ranges, starts, max_ends) == "CN"
+    assert _lookup_interval_index(170, ranges, starts, max_ends) == "KR"
+    assert _lookup_interval_index(250, ranges, starts, max_ends) is None
+
 

@@ -57,3 +57,21 @@ def test_build_menu_renderable_multi_select():
     assert isinstance(renderable, Group)
     table = next(r for r in renderable.renderables if isinstance(r, Table))
     assert table.row_count == 2
+
+
+def test_build_menu_renderable_long_rows_no_wrap():
+    rows = [
+        ("Very Long Iranian Provider Name With Many Words", "192.168.1.0/24, 192.168.2.0/24, 192.168.3.0/24 ..."),
+        ("Short", "Detail"),
+    ]
+    renderable = build_menu_renderable(
+        "Long Title",
+        rows,
+        cursor=0,
+        typed="1",
+        multi=True,
+        error_msg="Test error",
+    )
+    assert isinstance(renderable, Group)
+    table = next(r for r in renderable.renderables if isinstance(r, Table))
+    assert all(col.no_wrap for col in table.columns)

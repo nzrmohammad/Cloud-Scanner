@@ -3,7 +3,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import List, Optional, Tuple
 
-from scanner.analytics import apply_result_filters, output_sort_key
+from scanner.analytics import apply_result_filters, full_sort_key, output_sort_key
 from scanner.config import make_vless_link
 from scanner.constants import APP_CHANNEL, APP_VERSION, format_cf_colo
 from scanner.geoip import format_ip_location
@@ -11,6 +11,94 @@ from scanner.logger import get_logger
 from scanner.models import AppSettings, ScanResult, SmartRecommendation, VlessConfig
 
 logger = get_logger("storage")
+
+
+def _fmt_longevity_status(r: ScanResult) -> str:
+    """Safely format Anti-Drop status without crashing if longevity_loss is None."""
+    if r.sustained is True:
+        return "SUSTAINED"
+    if r.sustained is False:
+        return f"DROPPED({r.longevity_loss:.0f}%)" if r.longevity_loss is not None else "DROPPED"
+    return "-"
+
+
+def _fmt_summary_ad(r: ScanResult) -> str:
+    """Short Anti-Drop badge for summary table."""
+    if r.sustained is True:
+        return "HELD"
+    if r.sustained is False:
+        return f"DROP({r.longevity_loss:.0f}%)" if r.longevity_loss is not None else "DROP"
+    return "-"
+
+
+def _format_txt_line(
+    r: ScanResult,
+    *,
+    is_full: bool,
+    is_speed: bool,
+    is_longevity: bool,
+    is_recheck: bool,
+    include_port_in_addr: bool,
+    include_loc: bool,
+    include_speed_errors: bool,
+) -> str:
+    """Format a single ScanResult TXT output line (shared between main TXT and by_port TXT)."""
+    addr = r.endpoint if include_port_in_addr else r.ip
+    latency = f"{r.latency_ms:.1f} ms" if r.latency_ms is not None else "-"
+    down = f"{r.speed_mbps:.2f} Mbps" if r.speed_mbps is not None else "-"
+    up = f"{r.upload_mbps:.2f} Mbps" if r.upload_mbps is not None else "-"
+    jitter = f"{r.jitter_ms:.1f} ms" if r.jitter_ms is not None else "-"
+    loss = f"{r.packet_loss:.0f}%"
+    http_str = str(r.status_code) if r.status_code is not None else "-"
+    anti_drop = f" | anti_drop: {_fmt_longevity_status(r)}" if r.sustained is not None else ""
+    loc_str = f" | loc: {format_ip_location(r.ip_country, r.ip_city)}" if (include_loc and r.ip_country) else ""
+    colo_str = f" | colo: {format_cf_colo(r.colo)}" if r.colo else ""
+
+    extra_errs = []
+    if include_speed_errors and r.speed_error:
+        extra_errs.append(f"down_err: {r.speed_error}")
+    if include_speed_errors and r.upload_error:
+        extra_errs.append(f"up_err: {r.upload_error}")
+    extra = (" | " + ", ".join(extra_errs)) if extra_errs else ""
+
+    if is_full:
+        return (
+            f"{addr} | down: {down} | up: {up} | latency: {latency} | jitter: {jitter} | "
+            f"loss: {loss} | pass: {r.recheck_passed}/{r.recheck_total}{anti_drop}{loc_str}{colo_str} | HTTP {http_str}{extra}"
+        )
+    if is_speed:
+        return (
+            f"{addr} | down: {down} | up: {up} | downloaded: {r.download_bytes} bytes | "
+            f"uploaded: {r.upload_bytes} bytes{loc_str}{colo_str}{extra}"
+        )
+    if is_longevity:
+        return (
+            f"{addr} | anti_drop: {_fmt_longevity_status(r)} | latency: {latency}{loc_str}{colo_str} | HTTP {http_str}"
+        )
+    if is_recheck:
+        return (
+            f"{addr} | latency_avg: {latency} | jitter: {jitter} | loss: {loss} | "
+            f"pass: {r.recheck_passed}/{r.recheck_total}{anti_drop}{loc_str}{colo_str} | HTTP {http_str}"
+        )
+    return f"{addr} | latency: {latency}{loc_str}{colo_str} | HTTP {http_str}"
+
+
+def _format_vless_metric(r: ScanResult, *, is_speed: bool, is_full: bool, is_longevity: bool) -> str:
+    """Build remark tag metrics for exported VLESS links."""
+    anti_tag = "_AntiDrop" if r.sustained is True else ""
+    colo_tag = f"{r.colo}_" if r.colo else ""
+    if (is_speed or is_full) and r.speed_mbps is not None:
+        if r.upload_mbps is not None:
+            return f"{colo_tag}{r.speed_mbps:.1f}D_{r.upload_mbps:.1f}U{anti_tag}"
+        return f"{colo_tag}{r.speed_mbps:.2f}Mbps{anti_tag}"
+    if is_longevity and r.sustained is not None:
+        if r.sustained:
+            return f"{colo_tag}AntiDrop"
+        loss_s = f"{r.longevity_loss:.0f}pct" if r.longevity_loss is not None else ""
+        return f"{colo_tag}Drop{loss_s}"
+    if r.latency_ms is not None:
+        return f"{colo_tag}{r.latency_ms:.0f}ms{anti_tag}"
+    return colo_tag.rstrip("_")
 
 
 def save_results(
@@ -22,25 +110,19 @@ def save_results(
     include_speed_errors: bool = False,
     vless_config: Optional[VlessConfig] = None,
 ) -> Tuple[Path, Path]:
-    """Save results with independent ordering per stage and support per-port separation.
-
-    - clean_ips.*: sorted by latency only.
-    - clean_ips_rechecked.*: sorted by lowest loss, latency, and jitter.
-    - clean_ips_speed_tested.*: sorted by download and upload speed.
-    - clean_ips_vless.txt: ready-to-use VLESS links.
-    - by_port/: per-port separated TXT and VLESS files.
-    """
+    """Save results with independent ordering per stage and support per-port separation."""
     output_dir.mkdir(parents=True, exist_ok=True)
     ok = apply_result_filters(results, max_latency_ms=max_latency_ms, min_speed_mbps=min_speed_mbps)
-    ok = sorted(ok, key=output_sort_key(filename_prefix))
-    txt_path = output_dir / f"{filename_prefix}.txt"
-    csv_path = output_dir / f"{filename_prefix}.csv"
-    now = datetime.now().isoformat(timespec="seconds")
-
     is_full = "full" in filename_prefix or any(r.jitter_ms is not None and r.speed_mbps is not None for r in ok)
     is_speed = "speed" in filename_prefix and not is_full
     is_recheck = "rechecked" in filename_prefix and not is_full
     is_longevity = "longevity" in filename_prefix and not is_full
+
+    sort_fn = full_sort_key if is_full else output_sort_key(filename_prefix)
+    ok = sorted(ok, key=sort_fn)
+    txt_path = output_dir / f"{filename_prefix}.txt"
+    csv_path = output_dir / f"{filename_prefix}.csv"
+    now = datetime.now().isoformat(timespec="seconds")
 
     lines: List[str] = []
     if not ok:
@@ -52,7 +134,7 @@ def save_results(
     else:
         if is_full:
             lines.append(f"# Cloud Scanner {APP_VERSION} - Fully Tested Endpoints ({len(ok)} items) | {now}")
-            lines.append("# Evaluated: Stability (Loss/Jitter) + Anti-Drop (30s DPI stream) + Download & Upload speed")
+            lines.append("# Evaluated: Stability (Loss/Jitter) + Anti-Drop (DPI endurance) + Download & Upload speed")
         elif is_speed:
             lines.append(f"# Cloud Scanner {APP_VERSION} - Bandwidth Benchmarked Endpoints ({len(ok)} items) | {now}")
         elif is_longevity:
@@ -62,41 +144,18 @@ def save_results(
         else:
             lines.append(f"# Cloud Scanner {APP_VERSION} - Initial Latency Scan Clean Endpoints ({len(ok)} items) | {now}")
         for r in ok:
-            latency = f"{r.latency_ms:.1f} ms" if r.latency_ms is not None else "-"
-            down = f"{r.speed_mbps:.2f} Mbps" if r.speed_mbps is not None else "-"
-            up = f"{r.upload_mbps:.2f} Mbps" if r.upload_mbps is not None else "-"
-            jitter = f"{r.jitter_ms:.1f} ms" if r.jitter_ms is not None else "-"
-            loss = f"{r.packet_loss:.0f}%"
-            anti_drop = ""
-            if r.sustained is not None:
-                anti_drop = " | anti_drop: " + ("SUSTAINED" if r.sustained else f"DROPPED({r.longevity_loss:.0f}%)")
-            loc_str = f" | loc: {format_ip_location(r.ip_country, r.ip_city)}" if r.ip_country else ""
-            colo_str = f" | colo: {format_cf_colo(r.colo)}" if r.colo else ""
-            extra_errs = []
-            if include_speed_errors and r.speed_error:
-                extra_errs.append(f"down_err: {r.speed_error}")
-            if include_speed_errors and r.upload_error:
-                extra_errs.append(f"up_err: {r.upload_error}")
-            extra = (" | " + ", ".join(extra_errs)) if extra_errs else ""
-            if is_full:
-                lines.append(
-                    f"{r.ip}:{r.port} | down: {down} | up: {up} | latency: {latency} | jitter: {jitter} | loss: {loss} | pass: {r.recheck_passed}/{r.recheck_total}{anti_drop}{loc_str}{colo_str} | HTTP {r.status_code}{extra}"
+            lines.append(
+                _format_txt_line(
+                    r,
+                    is_full=is_full,
+                    is_speed=is_speed,
+                    is_longevity=is_longevity,
+                    is_recheck=is_recheck,
+                    include_port_in_addr=True,
+                    include_loc=True,
+                    include_speed_errors=include_speed_errors,
                 )
-            elif is_speed:
-                lines.append(
-                    f"{r.ip}:{r.port} | down: {down} | up: {up} | downloaded: {r.download_bytes} bytes | uploaded: {r.upload_bytes} bytes{loc_str}{colo_str}{extra}"
-                )
-            elif is_longevity:
-                drop_status = "SUSTAINED" if r.sustained else f"DROPPED({r.longevity_loss:.0f}%)"
-                lines.append(
-                    f"{r.ip}:{r.port} | anti_drop: {drop_status} | latency: {latency}{loc_str}{colo_str} | HTTP {r.status_code}"
-                )
-            elif is_recheck:
-                lines.append(
-                    f"{r.ip}:{r.port} | latency_avg: {latency} | jitter: {jitter} | loss: {loss} | pass: {r.recheck_passed}/{r.recheck_total}{anti_drop}{loc_str}{colo_str} | HTTP {r.status_code}"
-                )
-            else:
-                lines.append(f"{r.ip}:{r.port} | latency: {latency}{loc_str}{colo_str} | HTTP {r.status_code}")
+            )
     txt_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
     with csv_path.open("w", newline="", encoding="utf-8") as f:
@@ -258,7 +317,7 @@ def save_results(
                     format_cf_colo(r.colo) if r.colo else "",
                     r.recheck_passed or "",
                     r.recheck_total or "",
-                    r.status_code,
+                    r.status_code or "",
                     now,
                 ])
         else:
@@ -286,29 +345,22 @@ def save_results(
                     f"{r.latency_ms:.1f}" if r.latency_ms is not None else "",
                     r.colo or "",
                     format_cf_colo(r.colo) if r.colo else "",
-                    r.status_code,
+                    r.status_code or "",
                     now,
                 ])
 
     # Save ready-to-import VLESS links
     if vless_config and ok:
         vless_path = output_dir / f"{filename_prefix}_vless.txt"
-        vless_lines = []
-        for r in ok:
-            anti_tag = "_AntiDrop" if r.sustained is True else ""
-            colo_tag = f"{r.colo}_" if r.colo else ""
-            if (is_speed or is_full) and r.speed_mbps is not None:
-                if r.upload_mbps is not None:
-                    metric = f"{colo_tag}{r.speed_mbps:.1f}D_{r.upload_mbps:.1f}U{anti_tag}"
-                else:
-                    metric = f"{colo_tag}{r.speed_mbps:.2f}Mbps{anti_tag}"
-            elif is_longevity and r.sustained is not None:
-                metric = f"{colo_tag}AntiDrop" if r.sustained else f"{colo_tag}Drop{r.longevity_loss:.0f}pct"
-            elif r.latency_ms:
-                metric = f"{colo_tag}{r.latency_ms:.0f}ms{anti_tag}"
-            else:
-                metric = colo_tag.rstrip("_")
-            vless_lines.append(make_vless_link(vless_config, r.ip, r.port, metric))
+        vless_lines = [
+            make_vless_link(
+                vless_config,
+                r.ip,
+                r.port,
+                _format_vless_metric(r, is_speed=is_speed, is_full=is_full, is_longevity=is_longevity),
+            )
+            for r in ok
+        ]
         vless_path.write_text("\n".join(vless_lines) + "\n", encoding="utf-8")
 
     # Save per-port separated output files
@@ -319,45 +371,32 @@ def save_results(
         for p in ports_found:
             port_results = [r for r in ok if r.port == p]
             port_txt = by_port_dir / f"{filename_prefix}_port_{p}.txt"
-            port_lines = []
-            for r in port_results:
-                latency = f"{r.latency_ms:.1f} ms" if r.latency_ms is not None else "-"
-                down = f"{r.speed_mbps:.2f} Mbps" if r.speed_mbps is not None else "-"
-                up = f"{r.upload_mbps:.2f} Mbps" if r.upload_mbps is not None else "-"
-                jitter = f"{r.jitter_ms:.1f} ms" if r.jitter_ms is not None else "-"
-                loss = f"{r.packet_loss:.0f}%"
-                port_colo_str = f" | colo: {format_cf_colo(r.colo)}" if r.colo else ""
-                if is_full:
-                    port_lines.append(
-                        f"{r.ip} | down: {down} | up: {up} | latency: {latency} | jitter: {jitter} | loss: {loss} | pass: {r.recheck_passed}/{r.recheck_total}{port_colo_str} | HTTP {r.status_code}"
-                    )
-                elif is_speed:
-                    port_lines.append(
-                        f"{r.ip} | down: {down} | up: {up} | downloaded: {r.download_bytes} bytes | uploaded: {r.upload_bytes} bytes{port_colo_str}"
-                    )
-                elif is_recheck:
-                    port_lines.append(
-                        f"{r.ip} | latency_avg: {latency} | jitter: {jitter} | loss: {loss} | pass: {r.recheck_passed}/{r.recheck_total}{port_colo_str} | HTTP {r.status_code}"
-                    )
-                else:
-                    port_lines.append(f"{r.ip} | latency: {latency}{port_colo_str} | HTTP {r.status_code}")
+            port_lines = [
+                _format_txt_line(
+                    r,
+                    is_full=is_full,
+                    is_speed=is_speed,
+                    is_longevity=is_longevity,
+                    is_recheck=is_recheck,
+                    include_port_in_addr=False,
+                    include_loc=False,
+                    include_speed_errors=False,
+                )
+                for r in port_results
+            ]
             port_txt.write_text("\n".join(port_lines) + "\n", encoding="utf-8")
 
             if vless_config:
                 port_vless = by_port_dir / f"{filename_prefix}_vless_port_{p}.txt"
-                port_vless_lines = []
-                for r in port_results:
-                    port_colo_tag = f"{r.colo}_" if r.colo else ""
-                    if (is_speed or is_full) and r.speed_mbps is not None:
-                        if r.upload_mbps is not None:
-                            metric = f"{port_colo_tag}{r.speed_mbps:.1f}D_{r.upload_mbps:.1f}U"
-                        else:
-                            metric = f"{port_colo_tag}{r.speed_mbps:.2f}Mbps"
-                    elif r.latency_ms:
-                        metric = f"{port_colo_tag}{r.latency_ms:.0f}ms"
-                    else:
-                        metric = port_colo_tag.rstrip("_")
-                    port_vless_lines.append(make_vless_link(vless_config, r.ip, r.port, metric))
+                port_vless_lines = [
+                    make_vless_link(
+                        vless_config,
+                        r.ip,
+                        r.port,
+                        _format_vless_metric(r, is_speed=is_speed, is_full=is_full, is_longevity=is_longevity),
+                    )
+                    for r in port_results
+                ]
                 port_vless.write_text("\n".join(port_vless_lines) + "\n", encoding="utf-8")
 
     return txt_path, csv_path
@@ -479,10 +518,11 @@ def save_scan_summary_report(
                 lines.append(f"    Link     : {rec.vless_link}")
             lines.append("")
 
+    ep_w = max(26, max((len(r.endpoint) for r in ok), default=0) + 2)
     lines.extend([
         "4. DETAILED ENDPOINT BENCHMARK TABLE",
         sub_sep,
-        f"  {'#':<4} {'Endpoint':<26} {'Latency':<10} {'Jitter':<9} {'Loss%':<7} {'Anti-Drop':<11} {'Download':<12} {'Upload':<11} {'PoP (Colo)'}",
+        f"  {'#':<4} {'Endpoint':<{ep_w}} {'Latency':<10} {'Jitter':<9} {'Loss%':<7} {'Anti-Drop':<11} {'Download':<12} {'Upload':<11} {'PoP (Colo)'}",
         sub_sep,
     ])
 
@@ -490,11 +530,11 @@ def save_scan_summary_report(
         lat = f"{r.latency_ms:.1f}ms" if r.latency_ms is not None else "-"
         jit = f"{r.jitter_ms:.1f}ms" if r.jitter_ms is not None else "-"
         loss = f"{r.packet_loss:.0f}%" if r.packet_loss is not None else "-"
-        ad = "HELD" if r.sustained is True else (f"DROP({r.longevity_loss:.0f}%)" if r.sustained is False else "-")
+        ad = _fmt_summary_ad(r)
         dl = f"{r.speed_mbps:.2f}M" if r.speed_mbps is not None else "-"
         ul = f"{r.upload_mbps:.2f}M" if r.upload_mbps is not None else "-"
         colo = format_cf_colo(r.colo) if r.colo else "-"
-        lines.append(f"  {i:<4} {r.endpoint:<26} {lat:<10} {jit:<9} {loss:<7} {ad:<11} {dl:<12} {ul:<11} {colo}")
+        lines.append(f"  {i:<4} {r.endpoint:<{ep_w}} {lat:<10} {jit:<9} {loss:<7} {ad:<11} {dl:<12} {ul:<11} {colo}")
 
     lines.extend([
         sub_sep,

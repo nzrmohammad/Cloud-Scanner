@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import asyncio
 import random
 import socket
 import statistics
+import struct
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -30,6 +32,7 @@ from scanner.constants import (
     DEFAULT_UPLOAD_URL,
     DEFAULT_URL,
     app_dir,
+    format_host_port,
     mb_to_bytes,
     parse_cf_colo,
 )
@@ -43,7 +46,11 @@ from scanner.models import (
 )
 from scanner.storage import save_results
 from scanner.targets import parse_ip_and_port
-from scanner.xray import BatchXrayProcess, XrayProcess
+from scanner.xray import (
+    BatchXrayProcess,
+    XrayProcess,
+    terminate_active_xray_processes,
+)
 
 logger = get_logger("engine")
 
@@ -77,15 +84,13 @@ def _run_concurrent_tasks(
     stage_name: str,
     on_result: Optional[Callable[[R, int, int], None]] = None,
     abort_event: Optional[threading.Event] = None,
+    prior_results: Optional[List[R]] = None,
 ) -> List[R]:
-    """Execute task_fn concurrently across items with KeyboardInterrupt cancellation.
-
-    Adheres strictly to DRY principles by centralizing ThreadPoolExecutor management,
-    as_completed processing, error logging, and graceful ScanInterrupted raising.
-    """
+    """Execute task_fn concurrently across items with KeyboardInterrupt cancellation."""
     if not items:
         return []
 
+    ev = abort_event if abort_event is not None else threading.Event()
     results: List[R] = []
     ex = DaemonThreadPoolExecutor(max_workers=max(1, workers))
     futures = {}
@@ -107,13 +112,14 @@ def _run_concurrent_tasks(
                 except Exception as exc:
                     logger.debug("on_result callback error in %s: %s", stage_name, exc)
     except KeyboardInterrupt as exc:
-        if abort_event is not None:
-            abort_event.set()
+        ev.set()
         logger.warning("KeyboardInterrupt received in %s, canceling %d futures", stage_name, len(futures))
         for fut in futures:
             fut.cancel()
+        terminate_active_xray_processes()
         ex.shutdown(wait=False, cancel_futures=True)
-        raise ScanInterrupted(results, stage_name) from exc
+        partial = results if results else (list(prior_results) if prior_results else [])
+        raise ScanInterrupted(partial, stage_name) from exc
     finally:
         ex.shutdown(wait=False, cancel_futures=True)
 
@@ -138,35 +144,70 @@ def fast_tcp_filter(
     workers: int = 30,
     on_progress: Optional[Callable[[int, int, int], None]] = None,
 ) -> List[Tuple[str, int]]:
-    """Filter candidate endpoints using fast TCP handshake before running Xray."""
-    alive: List[Tuple[str, int]] = []
+    """Filter candidate endpoints using high-concurrency non-blocking asyncio TCP handshakes."""
     total = len(target_pairs)
     if total == 0:
         return []
-    max_w = min(workers, total, 30)
-    done = 0
-    with DaemonThreadPoolExecutor(max_workers=max_w) as ex:
-        futures = {ex.submit(check_tcp_port, ip, port, timeout): (ip, port) for ip, port in target_pairs}
-        try:
-            for fut in as_completed(futures):
-                pair = futures[fut]
+
+    max_w = min(max(workers * 2, 60), total, 100)
+    alive: List[Tuple[str, int]] = []
+    linger_bytes = struct.pack("ii", 1, 0)
+
+    async def _probe_all() -> List[Tuple[str, int]]:
+        loop = asyncio.get_running_loop()
+        sem = asyncio.Semaphore(max_w)
+        done = 0
+
+        async def _probe_one(pair: Tuple[str, int]) -> None:
+            nonlocal done
+            ip, port = pair
+            ok = False
+            async with sem:
+                sock: Optional[socket.socket] = None
                 try:
-                    if fut.result():
-                        alive.append(pair)
-                except Exception as exc:
-                    logger.debug("TCP prefilter error for %s:%d: %s", pair[0], pair[1], exc)
-                done += 1
-                if on_progress:
+                    family = socket.AF_INET6 if ":" in ip else socket.AF_INET
+                    sock = socket.socket(family, socket.SOCK_STREAM)
+                    sock.setblocking(False)
+                    await asyncio.wait_for(loop.sock_connect(sock, (ip, port)), timeout=timeout)
+                    # Reset cleanly on close to avoid TIME_WAIT socket exhaustion
                     try:
-                        on_progress(done, total, len(alive))
-                    except Exception as exc:
-                        logger.debug("Prefilter on_progress error: %s", exc)
-        except KeyboardInterrupt as exc:
-            for fut in futures:
-                fut.cancel()
-            ex.shutdown(wait=False, cancel_futures=True)
-            raise ScanInterrupted([], "tcp_prefilter") from exc
-    return alive
+                        sock.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, linger_bytes)
+                    except OSError:
+                        pass
+                    ok = True
+                except (asyncio.TimeoutError, OSError):
+                    ok = False
+                finally:
+                    if sock is not None:
+                        try:
+                            sock.close()
+                        except OSError:
+                            pass
+
+            if ok:
+                alive.append(pair)
+            done += 1
+            if on_progress:
+                try:
+                    on_progress(done, total, len(alive))
+                except Exception as exc:
+                    logger.debug("Prefilter on_progress error: %s", exc)
+
+        tasks = [asyncio.create_task(_probe_one(pair)) for pair in target_pairs]
+        try:
+            await asyncio.gather(*tasks)
+        except BaseException:
+            for t in tasks:
+                if not t.done():
+                    t.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            raise
+        return alive
+
+    try:
+        return asyncio.run(_probe_all())
+    except KeyboardInterrupt as exc:
+        raise ScanInterrupted([], "tcp_prefilter") from exc
 
 
 def save_tcp_alive_endpoints(
@@ -186,7 +227,7 @@ def save_tcp_alive_endpoints(
         "# Cloud Scanner - Fast TCP Pre-filter Alive Endpoints (IP:port)",
         f"# Total alive: {len(alive_endpoints)} | Timestamp: {time.strftime('%Y-%m-%d %H:%M:%S')}",
     ]
-    endpoint_lines.extend(f"[{ip}]:{port}" if ":" in ip else f"{ip}:{port}" for ip, port in alive_endpoints)
+    endpoint_lines.extend(format_host_port(ip, port) for ip, port in alive_endpoints)
     tcp_alive_file.write_text("\n".join(endpoint_lines) + "\n", encoding="utf-8")
 
     unique_ips = list(dict.fromkeys(ip for ip, _ in alive_endpoints))
@@ -200,6 +241,25 @@ def save_tcp_alive_endpoints(
     return tcp_alive_file, tcp_ips_file
 
 
+def _probe_via_proxies(
+    ip: str,
+    port: int,
+    proxies: dict[str, str],
+    timeout: int,
+    url: str,
+) -> Tuple[Optional[ScanResult], str]:
+    """Execute one HTTP latency probe over an established SOCKS proxy."""
+    if requests is None:
+        return ScanResult(ip=ip, port=port, ok=False, error="Python package requests[socks] is not installed"), ""
+    start = time.perf_counter()
+    r = requests.get(url, proxies=proxies, timeout=timeout, headers={"User-Agent": APP_HEADER})
+    latency = (time.perf_counter() - start) * 1000
+    if 200 <= r.status_code < 400:
+        colo = parse_cf_colo(r.text[:500]) if (r.text and "colo=" in r.text[:500]) else None
+        return ScanResult(ip=ip, port=port, ok=True, latency_ms=latency, status_code=r.status_code, colo=colo), ""
+    return None, f"HTTP {r.status_code}"
+
+
 def test_ip(
     v: VlessConfig,
     ip: str,
@@ -209,6 +269,7 @@ def test_ip(
     tries: int,
     url: str,
     loglevel: str = "warning",
+    abort_event: Optional[threading.Event] = None,
 ) -> ScanResult:
     """Test a single IP and port through Xray's local SOCKS proxy."""
     if requests is None:
@@ -216,15 +277,14 @@ def test_ip(
 
     last_error = ""
     for _ in range(max(1, tries)):
+        if abort_event is not None and abort_event.is_set():
+            return ScanResult(ip=ip, port=port, ok=False, error="Aborted")
         try:
-            start = time.perf_counter()
             with XrayProcess(xray, v, ip, port, loglevel=loglevel, ready_timeout=min(3.0, float(timeout))) as xp:
-                r = requests.get(url, proxies=xp.proxies, timeout=timeout, headers={"User-Agent": APP_HEADER})
-                latency = (time.perf_counter() - start) * 1000
-                if 200 <= r.status_code < 400:
-                    colo = parse_cf_colo(r.text[:500]) if (r.text and "colo=" in r.text[:500]) else None
-                    return ScanResult(ip=ip, port=port, ok=True, latency_ms=latency, status_code=r.status_code, colo=colo)
-                last_error = f"HTTP {r.status_code}"
+                res, err = _probe_via_proxies(ip, port, xp.proxies, timeout, url)
+                if res is not None:
+                    return res
+                last_error = err
         except TimeoutError:
             last_error = "Xray SOCKS port did not start"
         except Exception as exc:
@@ -245,6 +305,9 @@ class StreamUploadPayload:
         self._buffer = b"\x00" * min(self.chunk_size, max(1, self.size))
 
     def __iter__(self):
+        self.bytes_sent = 0
+        self.transfer_start = None
+        self.transfer_end = None
         while self.bytes_sent < self.size:
             if self.transfer_start is None:
                 self.transfer_start = time.perf_counter()
@@ -255,6 +318,31 @@ class StreamUploadPayload:
 
     def __len__(self) -> int:
         return self.size
+
+
+def _run_upload_probe(
+    session: Any,
+    upload_url: str,
+    size_bytes: int,
+    timeout_s: float,
+    rtt_sec: float,
+) -> Tuple[Optional[float], int, Optional[float], str]:
+    """Execute one streaming upload probe and return (mbps, bytes_sent, duration_s, error)."""
+    payload = StreamUploadPayload(size_bytes)
+    up_start = time.perf_counter()
+    up_r = session.post(
+        upload_url,
+        data=payload,
+        timeout=timeout_s,
+        headers={"User-Agent": APP_HEADER, "Content-Type": "application/octet-stream"},
+    )
+    up_elapsed = time.perf_counter() - up_start
+    if 200 <= up_r.status_code < 400 and up_elapsed > 0.02 and size_bytes > 0:
+        effective = up_elapsed - rtt_sec if (rtt_sec > 0 and up_elapsed > rtt_sec + 0.05) else up_elapsed
+        effective = max(0.04, effective)
+        mbps = (size_bytes * 8) / (effective * 1_000_000)
+        return round(mbps, 2), size_bytes, round(effective, 3), ""
+    return None, 0, None, f"HTTP {up_r.status_code}"
 
 
 def speed_test_ip(
@@ -269,30 +357,32 @@ def speed_test_ip(
     test_upload: bool = True,
     upload_bytes: int = DEFAULT_UPLOAD_BYTES,
     upload_url: str = DEFAULT_UPLOAD_URL,
+    abort_event: Optional[threading.Event] = None,
 ) -> ScanResult:
     """Run real download and upload speed tests through Xray for one working endpoint."""
-    ip = base_result.ip
-    port = base_result.port
     out = replace(base_result)
 
     if requests is None:
         out.speed_error = "Python package requests[socks] is not installed"
         return out
 
+    if abort_event is not None and abort_event.is_set():
+        out.speed_error = "Aborted"
+        return out
+
+    ip, port = base_result.ip, base_result.port
     try:
         with XrayProcess(xray, v, ip, port, loglevel=loglevel, ready_timeout=min(3.0, float(timeout))) as xp:
-            proxies = xp.proxies
             preliminary_mbps: Optional[float] = None
 
             with requests.Session() as session:
-                session.proxies = proxies
+                session.proxies = xp.proxies
 
                 # 1. Download Speed Test with Warmup, TTFB isolation, Adaptive Sizing & Median Filtering
                 if speed_bytes > 0:
                     warmup_size = min(speed_bytes, mb_to_bytes(1) // 4)
                     warmup_url = speed_url_template.format(bytes=warmup_size)
 
-                    # Warmup phase: establishes TCP window size, isolates TTFB, measures preliminary throughput
                     try:
                         w_req_start = time.perf_counter()
                         with session.get(
@@ -301,25 +391,24 @@ def speed_test_ip(
                             stream=True,
                             headers={"User-Agent": APP_HEADER},
                         ) as w:
-                            ttfb = (time.perf_counter() - w_req_start) * 1000.0
-                            out.ttfb_ms = round(ttfb, 1)
+                            if 200 <= w.status_code < 400:
+                                ttfb = (time.perf_counter() - w_req_start) * 1000.0
+                                out.ttfb_ms = round(ttfb, 1)
 
-                            w_downloaded = 0
-                            w_transfer_start = time.perf_counter()
-                            for chunk in w.iter_content(chunk_size=64 * 1024):
-                                if not chunk:
-                                    break
-                                w_downloaded += len(chunk)
-                            w_elapsed = time.perf_counter() - w_transfer_start
-                            if w_elapsed > 0.02 and w_downloaded > 0:
-                                preliminary_mbps = (w_downloaded * 8) / (w_elapsed * 1_000_000)
+                                w_downloaded = 0
+                                w_transfer_start = time.perf_counter()
+                                for chunk in w.iter_content(chunk_size=64 * 1024):
+                                    if abort_event is not None and abort_event.is_set():
+                                        break
+                                    if not chunk:
+                                        break
+                                    w_downloaded += len(chunk)
+                                w_elapsed = time.perf_counter() - w_transfer_start
+                                if w_elapsed > 0.02 and w_downloaded > 0:
+                                    preliminary_mbps = (w_downloaded * 8) / (w_elapsed * 1_000_000)
                     except Exception as exc:
                         logger.debug("Warmup error for %s: %s", out.endpoint, exc)
 
-                    # Adaptive payload sizing based on preliminary throughput:
-                    # - Very slow (< 20 Mbps): shrink to ~2 MB so test finishes promptly without socket timeout
-                    # - Very fast (> 100 Mbps): expand to ~20 MB to properly saturate high-BDP pipe
-                    # - Normal (20..100 Mbps): maintain configured speed_bytes (typically 5 MB)
                     target_bytes = speed_bytes
                     if preliminary_mbps is not None:
                         if preliminary_mbps < 20.0:
@@ -327,9 +416,9 @@ def speed_test_ip(
                         elif preliminary_mbps > 100.0:
                             target_bytes = max(speed_bytes, mb_to_bytes(20))
 
-                    # Multi-burst measurement: run 2-3 iterations taking the median to filter network jitter
                     num_bursts = 3 if speed_duration >= 4 else 2
                     per_burst_duration = max(1.5, float(speed_duration) / float(num_bursts)) if speed_duration > 0 else float(timeout)
+                    per_burst_timeout = min(float(timeout), max(2.5, per_burst_duration + 2.0))
 
                     burst_speeds: List[float] = []
                     total_downloaded = 0
@@ -340,17 +429,19 @@ def speed_test_ip(
                     burst_deadline = start_all_bursts + speed_duration if speed_duration > 0 else start_all_bursts + timeout
 
                     for burst_idx in range(num_bursts):
+                        if abort_event is not None and abort_event.is_set():
+                            break
                         if time.perf_counter() >= burst_deadline - 0.2 and burst_speeds:
                             break
                         try:
                             req_start = time.perf_counter()
                             with session.get(
                                 burst_url,
-                                timeout=timeout,
+                                timeout=per_burst_timeout,
                                 stream=True,
                                 headers={"User-Agent": APP_HEADER},
                             ) as r:
-                                if out.ttfb_ms is None:
+                                if out.ttfb_ms is None and 200 <= r.status_code < 400:
                                     out.ttfb_ms = round((time.perf_counter() - req_start) * 1000.0, 1)
 
                                 if not (200 <= r.status_code < 400):
@@ -363,10 +454,13 @@ def speed_test_ip(
                                 run_deadline = transfer_start + per_burst_duration
 
                                 for chunk in r.iter_content(chunk_size=32 * 1024):
+                                    if abort_event is not None and abort_event.is_set():
+                                        break
                                     if not chunk:
                                         break
                                     burst_downloaded += len(chunk)
-                                    if time.perf_counter() >= run_deadline or time.perf_counter() >= burst_deadline:
+                                    now_t = time.perf_counter()
+                                    if now_t >= run_deadline or now_t >= burst_deadline:
                                         break
 
                                 transfer_elapsed = time.perf_counter() - transfer_start
@@ -386,10 +480,8 @@ def speed_test_ip(
                     elif not out.speed_error:
                         out.speed_error = "Insufficient data received"
 
-                # 2. Upload Speed Test (Adaptive Payload & Precise Transfer Timing)
-                if test_upload and upload_bytes > 0:
-                    # Adapt upload payload size according to preliminary downlink bandwidth to prevent timeouts
-                    # on asymmetric ADSL/LTE uplinks (e.g. 0.1 - 2 Mbps)
+                # 2. Upload Speed Test (Zero-RAM streaming payload & RTT compensation)
+                if test_upload and upload_bytes > 0 and not (abort_event is not None and abort_event.is_set()):
                     target_up_bytes = upload_bytes
                     if preliminary_mbps is not None:
                         if preliminary_mbps < 5.0:
@@ -402,44 +494,24 @@ def speed_test_ip(
                         target_up_bytes = min(upload_bytes, 250_000)
 
                     up_timeout = max(float(timeout), float(speed_duration) + 5.0, 15.0)
-                    payload_data = b"0" * target_up_bytes
+                    rtt_sec = (out.ttfb_ms if out.ttfb_ms is not None else (base_result.latency_ms or 0.0)) / 1000.0
 
                     try:
-                        up_start = time.perf_counter()
-                        up_r = session.post(
-                            upload_url,
-                            data=payload_data,
-                            timeout=up_timeout,
-                            headers={"User-Agent": APP_HEADER, "Content-Type": "application/octet-stream"},
-                        )
-                        up_elapsed = time.perf_counter() - up_start
-                        if 200 <= up_r.status_code < 400 and up_elapsed > 0.02 and len(payload_data) > 0:
-                            up_mbps = (len(payload_data) * 8) / (up_elapsed * 1_000_000)
-                            out.upload_mbps = round(up_mbps, 2)
-                            out.upload_bytes = len(payload_data)
-                            out.upload_duration = round(up_elapsed, 3)
-                            out.upload_error = ""
+                        mbps, sent, dur, err = _run_upload_probe(session, upload_url, target_up_bytes, up_timeout, rtt_sec)
+                        if mbps is not None:
+                            out.upload_mbps, out.upload_bytes, out.upload_duration, out.upload_error = mbps, sent, dur, ""
                         else:
-                            out.upload_error = f"HTTP {up_r.status_code}"
+                            out.upload_error = err
                     except Exception as exc:
-                        # Fallback for ultra-constrained links: retry with a small 50 KB probe if timed out
                         if target_up_bytes > 50_000 and "timed out" in str(exc).lower():
                             try:
-                                fb_data = b"0" * 50_000
-                                fb_start = time.perf_counter()
-                                fb_r = session.post(
-                                    upload_url,
-                                    data=fb_data,
-                                    timeout=min(up_timeout, 8.0),
-                                    headers={"User-Agent": APP_HEADER, "Content-Type": "application/octet-stream"},
+                                mbps, sent, dur, err = _run_upload_probe(
+                                    session, upload_url, 50_000, min(up_timeout, 8.0), rtt_sec
                                 )
-                                fb_elapsed = time.perf_counter() - fb_start
-                                if 200 <= fb_r.status_code < 400 and fb_elapsed > 0.02:
-                                    fb_mbps = (len(fb_data) * 8) / (fb_elapsed * 1_000_000)
-                                    out.upload_mbps = round(fb_mbps, 2)
-                                    out.upload_bytes = len(fb_data)
-                                    out.upload_duration = round(fb_elapsed, 3)
-                                    out.upload_error = ""
+                                if mbps is not None:
+                                    out.upload_mbps, out.upload_bytes, out.upload_duration, out.upload_error = mbps, sent, dur, ""
+                                else:
+                                    out.upload_error = err
                             except Exception as fb_exc:
                                 logger.debug("Upload fallback failed for %s: %s", out.endpoint, fb_exc)
                                 out.upload_error = str(exc).split("\n", 1)[0][:100]
@@ -468,8 +540,11 @@ def run_speed_tests(
     upload_bytes: int = DEFAULT_UPLOAD_BYTES,
     upload_url: str = DEFAULT_UPLOAD_URL,
     on_result: Optional[Callable[[ScanResult, int, int], None]] = None,
+    abort_event: Optional[threading.Event] = None,
 ) -> List[ScanResult]:
     """Benchmark download and upload speed concurrently across targets."""
+    ev = abort_event or threading.Event()
+
     def _test(r: ScanResult) -> ScanResult:
         return speed_test_ip(
             v,
@@ -483,9 +558,10 @@ def run_speed_tests(
             test_upload,
             upload_bytes,
             upload_url,
+            abort_event=ev,
         )
 
-    results = _run_concurrent_tasks(targets, _test, workers, "speed test", on_result=on_result)
+    results = _run_concurrent_tasks(targets, _test, workers, "speed test", on_result=on_result, abort_event=ev)
     return sorted(results, key=speed_sort_key)
 
 
@@ -525,6 +601,8 @@ def summarize_latency(results: List[ScanResult]) -> ScanResult:
     base.packet_loss = ((total - passed) / total) * 100.0 if total > 0 else 100.0
 
     if valid_latencies:
+        first_ok_status = next((r.status_code for r in results if r.ok and r.status_code is not None), base.status_code)
+        base.status_code = first_ok_status
         base.latency_ms = statistics.median(valid_latencies)
         base.jitter_ms = calc_rfc_jitter([r.latency_ms for r in results if r.ok and r.latency_ms is not None])
         p90 = calc_percentile(valid_latencies, 90.0)
@@ -549,8 +627,9 @@ def retest_ip_latency(
     sample_count: int = 8,
     url: str = DEFAULT_URL,
     loglevel: str = "warning",
+    abort_event: Optional[threading.Event] = None,
 ) -> ScanResult:
-    """Retest endpoint latency across multiple spaced samples using a single shared XrayProcess."""
+    """Retest endpoint latency across multiple spaced samples using a shared XrayProcess and Session."""
     ip = base_result.ip
     port = base_result.port
     samples: List[ScanResult] = []
@@ -563,28 +642,62 @@ def retest_ip_latency(
 
     try:
         with XrayProcess(xray, v, ip, port, loglevel=loglevel, ready_timeout=min(3.0, float(timeout))) as xp:
-            for i in range(sample_count):
-                if i > 0:
-                    time.sleep(random.uniform(0.2, 0.5))
-                start = time.perf_counter()
+            session = requests.Session()
+            session.proxies = xp.proxies
+            try:
+                for i in range(sample_count):
+                    if abort_event is not None and abort_event.is_set():
+                        break
+                    if i > 0:
+                        time.sleep(random.uniform(0.2, 0.5))
+                    if abort_event is not None and abort_event.is_set():
+                        break
+                    start = time.perf_counter()
+                    try:
+                        r = session.get(url, timeout=timeout, headers={"User-Agent": APP_HEADER})
+                        lat = (time.perf_counter() - start) * 1000
+                        if 200 <= r.status_code < 400:
+                            samples.append(ScanResult(ip=ip, port=port, ok=True, latency_ms=lat, status_code=r.status_code))
+                        else:
+                            samples.append(ScanResult(ip=ip, port=port, ok=False, error=f"HTTP {r.status_code}"))
+                    except Exception as exc:
+                        logger.debug("Sample %d failed for %s:%d: %s", i + 1, ip, port, exc)
+                        samples.append(ScanResult(ip=ip, port=port, ok=False, error=str(exc)[:60]))
+                        # Reset pooled connection so the next probe uses a clean socket
+                        try:
+                            session.close()
+                        except Exception:
+                            pass
+                        session = requests.Session()
+                        session.proxies = xp.proxies
+            finally:
                 try:
-                    r = requests.get(url, proxies=xp.proxies, timeout=timeout, headers={"User-Agent": APP_HEADER})
-                    lat = (time.perf_counter() - start) * 1000
-                    if 200 <= r.status_code < 400:
-                        samples.append(ScanResult(ip=ip, port=port, ok=True, latency_ms=lat, status_code=r.status_code))
-                    else:
-                        samples.append(ScanResult(ip=ip, port=port, ok=False, error=f"HTTP {r.status_code}"))
-                except Exception as exc:
-                    logger.debug("Sample %d failed for %s:%d: %s", i + 1, ip, port, exc)
-                    samples.append(ScanResult(ip=ip, port=port, ok=False, error=str(exc)[:60]))
+                    session.close()
+                except Exception:
+                    pass
     except Exception as exc:
         logger.debug("Failed to spawn Xray for retest of %s:%d: %s", ip, port, exc)
         for _ in range(sample_count):
             samples.append(ScanResult(ip=ip, port=port, ok=False, error="Xray process error"))
 
+    if not samples:
+        out = replace(base_result)
+        out.error = "Aborted"
+        return out
+
     summary = summarize_latency(samples)
-    summary.colo = base_result.colo
-    return summary
+    out = replace(base_result)
+    out.ok = summary.ok
+    out.latency_ms = summary.latency_ms
+    out.jitter_ms = summary.jitter_ms
+    out.packet_loss = summary.packet_loss
+    out.recheck_passed = summary.recheck_passed
+    out.recheck_total = summary.recheck_total
+    out.latency_stats = summary.latency_stats
+    out.error = summary.error
+    if summary.status_code is not None:
+        out.status_code = summary.status_code
+    return out
 
 
 def run_latency_recheck(
@@ -597,16 +710,19 @@ def run_latency_recheck(
     url: str = DEFAULT_URL,
     loglevel: str = "warning",
     on_result: Optional[Callable[[ScanResult, int, int], None]] = None,
+    abort_event: Optional[threading.Event] = None,
 ) -> List[ScanResult]:
     """Execute latency stability and jitter recheck across candidate endpoints."""
     targets = sorted(ok_results, key=lambda r: r.latency_ms if r.latency_ms is not None else 10**9)
     if not targets:
         return []
 
-    def _test(t: ScanResult) -> ScanResult:
-        return retest_ip_latency(v, t, xray, timeout, sample_count, url, loglevel)
+    ev = abort_event or threading.Event()
 
-    results = _run_concurrent_tasks(targets, _test, workers, "latency re-check", on_result=on_result)
+    def _test(t: ScanResult) -> ScanResult:
+        return retest_ip_latency(v, t, xray, timeout, sample_count, url, loglevel, abort_event=ev)
+
+    results = _run_concurrent_tasks(targets, _test, workers, "latency re-check", on_result=on_result, abort_event=ev)
     return sorted(results, key=recheck_sort_key)
 
 
@@ -624,21 +740,7 @@ def longevity_test_ip(
     abort_event: Optional[threading.Event] = None,
     **kwargs: Any,
 ) -> ScanResult:
-    """Run continuous stream endurance test evaluating DPI resilience and packet drop over time.
-
-    Methodology:
-    - Sustained Data Flow: Unlike micro-pings (generate_204) which bypass deep packet inspection (DPI),
-      this test pulls a continuous high-volume binary stream for the specified duration (e.g. 30s).
-    - False-Negative Prevention: If a fast connection finishes downloading early, it immediately loops
-      to continue streaming so fast endpoints are never penalized.
-    - Soft-Stall vs Hard-Drop Detection:
-      * Soft-Stall: If DPI throttles the connection to zero throughput without sending a TCP RST packet,
-        a socket ReadTimeout occurs after `timeout` seconds of silence.
-      * Hard-Drop: If the firewall sends a TCP RST packet or tears down the TLS layer, a ConnectionError
-        (ConnectionResetError / ProtocolError) occurs immediately.
-      * Loss Percentage: Drop percentage is evaluated as the proportion of unstreamed test duration
-        relative to total test duration. Endpoints with loss <= 5% and sustained bytes pass.
-    """
+    """Run continuous stream endurance test evaluating DPI resilience and packet drop over time."""
     ip = base_result.ip
     port = base_result.port
     out = replace(base_result)
@@ -648,27 +750,30 @@ def longevity_test_ip(
         out.longevity_loss = 100.0
         return out
 
-    # Handle legacy url keyword argument if provided
     raw_url = kwargs.get("url")
     effective_stream_url: str = str(raw_url) if (raw_url and stream_url == DEFAULT_STREAM_URL and str(raw_url).startswith("http")) else str(stream_url)
 
     total_bytes = 0
     stream_interrupted = False
+    aborted = False
     fail_time: Optional[float] = None
 
     try:
         with XrayProcess(xray, v, ip, port, loglevel=loglevel, ready_timeout=min(3.0, float(timeout))) as xp:
             start_time = time.perf_counter()
             end_time = start_time + duration
+            last_data_time = start_time
+            req_timeout = min(max(float(timeout), 3.0), max(3.0, float(duration)))
 
             while time.perf_counter() < end_time and not stream_interrupted:
                 if abort_event is not None and abort_event.is_set():
+                    aborted = True
                     break
                 try:
                     with requests.get(
                         effective_stream_url,
                         proxies=xp.proxies,
-                        timeout=max(timeout, 5),
+                        timeout=req_timeout,
                         stream=True,
                         headers={"User-Agent": APP_HEADER},
                     ) as r:
@@ -680,6 +785,7 @@ def longevity_test_ip(
 
                         for chunk in r.iter_content(chunk_size=32 * 1024):
                             if abort_event is not None and abort_event.is_set():
+                                aborted = True
                                 try:
                                     r.close()
                                 except Exception:
@@ -687,29 +793,46 @@ def longevity_test_ip(
                                 break
                             if chunk:
                                 total_bytes += len(chunk)
+                                last_data_time = time.perf_counter()
                             if time.perf_counter() >= end_time:
                                 break
                 except (requests.exceptions.ReadTimeout, TimeoutError) as exc:
-                    # Soft-stall: DPI throttled stream to zero bytes
+                    if abort_event is not None and abort_event.is_set():
+                        aborted = True
+                        break
                     logger.debug("Longevity soft-stall (ReadTimeout) for %s: %s", out.endpoint, exc)
                     stream_interrupted = True
-                    fail_time = time.perf_counter()
+                    # Attribute loss starting from the last received byte rather than after ReadTimeout fired
+                    fail_time = min(last_data_time, end_time)
                     break
                 except (requests.exceptions.ConnectionError, OSError) as exc:
-                    # Hard-drop: DPI firewall injected TCP RST or severed TLS connection
+                    if abort_event is not None and abort_event.is_set():
+                        aborted = True
+                        break
                     logger.debug("Longevity hard-drop (ConnectionReset/RST) for %s: %s", out.endpoint, exc)
                     stream_interrupted = True
-                    fail_time = time.perf_counter()
+                    fail_time = min(time.perf_counter(), end_time)
                     break
                 except Exception as exc:
+                    if abort_event is not None and abort_event.is_set():
+                        aborted = True
+                        break
                     logger.debug("Longevity stream failure for %s: %s", out.endpoint, exc)
                     stream_interrupted = True
-                    fail_time = time.perf_counter()
+                    fail_time = min(time.perf_counter(), end_time)
                     break
+
+            if aborted:
+                out.sustained = None
+                out.longevity_loss = None
+                out.error = "Aborted"
+                return out
 
             if stream_interrupted and fail_time is not None:
                 dropped_time = max(0.0, end_time - fail_time)
-                loss_pct = (dropped_time / duration) * 100.0
+                loss_pct = min(100.0, (dropped_time / max(1e-6, float(duration))) * 100.0)
+            elif total_bytes <= 100_000:
+                loss_pct = 100.0
             else:
                 loss_pct = 0.0
 
@@ -770,12 +893,96 @@ def run_latency_scan(
     loglevel: str = "warning",
     on_result: Optional[Callable[[ScanResult, int, int], None]] = None,
 ) -> List[ScanResult]:
-    """Execute initial Xray latency scan across candidate endpoints."""
-    def _test(pair: Tuple[str, int]) -> ScanResult:
-        ip, port = pair
-        return test_ip(v, ip, port, xray, timeout, tries, url, loglevel)
+    """Execute initial Xray latency scan using batched Xray processes for minimal spawn overhead."""
+    if not target_pairs:
+        return []
 
-    return _run_concurrent_tasks(target_pairs, _test, concurrency, "scan", on_result=on_result)
+    ev = threading.Event()
+    if len(target_pairs) == 1 or tries > 1 or requests is None:
+        def _single(pair: Tuple[str, int]) -> ScanResult:
+            ip, port = pair
+            return test_ip(v, ip, port, xray, timeout, tries, url, loglevel, abort_event=ev)
+
+        return _run_concurrent_tasks(target_pairs, _single, concurrency, "scan", on_result=on_result, abort_event=ev)
+
+    results: List[ScanResult] = []
+    total = len(target_pairs)
+    done = 0
+    batch_size = min(max(concurrency, 10), 20)
+
+    for i in range(0, total, batch_size):
+        chunk = target_pairs[i : i + batch_size]
+        try:
+            with BatchXrayProcess(
+                xray, v, chunk, loglevel=loglevel, ready_timeout=min(4.0, float(timeout) + 2.0)
+            ) as bxp:
+                def _probe_batch_item(pair: Tuple[str, int]) -> ScanResult:
+                    ip, port = pair
+                    if ev.is_set():
+                        return ScanResult(ip=ip, port=port, ok=False, error="Aborted")
+                    proxies = bxp.get_proxies_for_endpoint(ip, port)
+                    if not proxies:
+                        return ScanResult(ip=ip, port=port, ok=False, error="Missing SOCKS mapping")
+                    try:
+                        res, err = _probe_via_proxies(ip, port, proxies, timeout, url)
+                        if res is not None:
+                            return res
+                        return ScanResult(ip=ip, port=port, ok=False, error=err or "Failed")
+                    except Exception as exc:
+                        logger.debug("Batch probe failed for %s:%d: %s", ip, port, exc)
+                        return ScanResult(ip=ip, port=port, ok=False, error=str(exc).split("\n", 1)[0][:160])
+
+                ex = DaemonThreadPoolExecutor(max_workers=min(concurrency, len(chunk)))
+                futures = {}
+                try:
+                    futures = {ex.submit(_probe_batch_item, pair): pair for pair in chunk}
+                    for fut in as_completed(futures):
+                        try:
+                            res = fut.result()
+                        except Exception as exc:
+                            logger.error("Unhandled batch scan error: %s", exc, exc_info=True)
+                            continue
+                        results.append(res)
+                        done += 1
+                        if on_result:
+                            try:
+                                on_result(res, done, total)
+                            except Exception as cb_exc:
+                                logger.debug("on_result callback error in scan: %s", cb_exc)
+                except KeyboardInterrupt as exc:
+                    ev.set()
+                    for fut in futures:
+                        fut.cancel()
+                    terminate_active_xray_processes()
+                    ex.shutdown(wait=False, cancel_futures=True)
+                    raise ScanInterrupted(results, "scan") from exc
+                finally:
+                    ex.shutdown(wait=False, cancel_futures=True)
+        except ScanInterrupted:
+            raise
+        except KeyboardInterrupt as exc:
+            ev.set()
+            terminate_active_xray_processes()
+            raise ScanInterrupted(results, "scan") from exc
+        except Exception as exc:
+            logger.debug("BatchXrayProcess failed for scan chunk (%s), falling back to individual test_ip", exc)
+            try:
+                chunk_res = _run_concurrent_tasks(
+                    chunk,
+                    lambda p: test_ip(v, p[0], p[1], xray, timeout, tries, url, loglevel, abort_event=ev),
+                    min(concurrency, len(chunk)),
+                    "scan",
+                    on_result=lambda r, _d, _t: on_result(r, done + _d, total) if on_result else None,
+                    abort_event=ev,
+                    prior_results=results,
+                )
+                results.extend(chunk_res)
+                done += len(chunk_res)
+            except ScanInterrupted as interrupted:
+                combined = results + interrupted.results
+                raise ScanInterrupted(combined, "scan") from interrupted
+
+    return results
 
 
 def run_scan(
@@ -917,7 +1124,7 @@ def enrich_results_with_colo(
                     except Exception as exc:
                         logger.debug("Failed colo request for %s: %s", r.endpoint, exc)
 
-                with ThreadPoolExecutor(max_workers=min(workers, len(chunk))) as ex:
+                with DaemonThreadPoolExecutor(max_workers=min(workers, len(chunk))) as ex:
                     list(ex.map(_fetch, chunk))
         except Exception as exc:
             logger.debug("BatchXrayProcess failed for chunk, falling back to individual resolution: %s", exc)
@@ -1011,6 +1218,17 @@ def run_speed_stage(
     )
 
 
+def _save_stage_output(
+    results: List[ScanResult],
+    output_dir: Path,
+    prefix: str,
+    v: VlessConfig,
+    include_speed_errors: bool = False,
+) -> Tuple[List[ScanResult], Path, Path, str]:
+    txt, csvp = save_results(results, output_dir, prefix, include_speed_errors=include_speed_errors, vless_config=v)
+    return results, txt, csvp, prefix
+
+
 def execute_configured_post_scan_tests(
     settings: AppSettings,
     v: VlessConfig,
@@ -1020,134 +1238,111 @@ def execute_configured_post_scan_tests(
     on_stage: Optional[Callable[[str, str, str], None]] = None,
     on_message: Optional[Callable[[str, str], None]] = None,
     make_reporter: Optional[Callable[..., Any]] = None,
+    strict_top_targets: bool = False,
 ) -> Tuple[List[ScanResult], Path, Path, str]:
     """Execute post-scan stability and/or speed testing automatically according to AppSettings."""
     if not working_results:
-        txt, csvp = save_results(working_results, output_dir, "clean_ips", vless_config=v)
-        return working_results, txt, csvp, "clean_ips"
+        return _save_stage_output(working_results, output_dir, "clean_ips", v)
 
-    if settings.post_scan_mode == "none":
+    mode = settings.post_scan_mode
+    if mode not in ("full", "stability", "longevity", "speed"):
         enrich_results_with_colo(v, working_results, xray, workers=min(settings.workers, 20), timeout=settings.timeout)
-        txt, csvp = save_results(working_results, output_dir, "clean_ips", vless_config=v)
-        return working_results, txt, csvp, "clean_ips"
+        return _save_stage_output(working_results, output_dir, "clean_ips", v)
 
     sorted_working = sorted(working_results, key=latency_sort_key)
-    candidates = sorted_working if (settings.top_targets <= 0 or settings.top_targets >= len(sorted_working)) else sorted_working[: settings.top_targets]
+    top_limit = settings.top_targets
+    candidates = sorted_working if (top_limit <= 0 or top_limit >= len(sorted_working)) else sorted_working[:top_limit]
     abort_event = threading.Event()
 
-    # Mode: Full (Stability + Anti-Drop + Speed)
-    if settings.post_scan_mode == "full":
-        stability_candidates = sorted_working if (settings.top_targets <= 0 or len(sorted_working) <= max(settings.top_targets, 50)) else sorted_working[: max(settings.top_targets, 50)]
+    # Mode: Full (Stability -> Top Trim -> Anti-Drop -> Speed)
+    if mode == "full":
+        if top_limit <= 0:
+            stability_candidates = sorted_working
+        else:
+            stab_cap = top_limit if strict_top_targets else max(top_limit, 50)
+            stability_candidates = sorted_working[:stab_cap]
+
         try:
             rechecked = run_stability_stage(
                 v, stability_candidates, xray, settings.speed_workers, settings.timeout,
                 settings.ping_samples, settings.test_url, on_stage=on_stage, make_reporter=make_reporter,
             )
         except ScanInterrupted as interrupted:
-            rechecked = interrupted.results
-            txt, csvp = save_results(rechecked, output_dir, "clean_ips_full_interrupted", vless_config=v)
-            return rechecked, txt, csvp, "clean_ips_full_interrupted"
+            return _save_stage_output(interrupted.results or stability_candidates, output_dir, "clean_ips_full_interrupted", v)
 
         survivors = [r for r in rechecked if r.ok and r.packet_loss < 100.0]
         if not survivors:
             if on_message:
                 on_message("No endpoints survived stability test.", "yellow")
-            txt, csvp = save_results(rechecked, output_dir, "clean_ips_rechecked", vless_config=v)
-            return rechecked, txt, csvp, "clean_ips_rechecked"
+            return _save_stage_output(rechecked, output_dir, "clean_ips_rechecked", v)
+
+        # Trim to top_targets before slow 30s longevity & speed stages
+        ranked_survivors = sorted(survivors, key=recheck_sort_key)
+        if top_limit > 0 and len(ranked_survivors) > top_limit:
+            ranked_survivors = ranked_survivors[:top_limit]
 
         if settings.longevity_test:
             try:
-                survivors = run_longevity_stage(
-                    v, survivors, xray, min(settings.speed_workers, 5), settings.longevity_duration,
+                ranked_survivors = run_longevity_stage(
+                    v, ranked_survivors, xray, min(settings.speed_workers, 5), settings.longevity_duration,
                     settings.timeout, on_stage=on_stage, make_reporter=make_reporter, abort_event=abort_event,
                 )
             except ScanInterrupted as interrupted:
-                survivors = interrupted.results
-                txt, csvp = save_results(survivors, output_dir, "clean_ips_full_interrupted", vless_config=v)
-                return survivors, txt, csvp, "clean_ips_full_interrupted"
-
-        speed_candidates = sorted(survivors, key=recheck_sort_key)[: settings.top_targets] if (settings.top_targets > 0 and len(survivors) > settings.top_targets) else survivors
+                partial = interrupted.results if interrupted.results else ranked_survivors
+                return _save_stage_output(partial, output_dir, "clean_ips_full_interrupted", v)
 
         try:
             tested = run_speed_stage(
-                v, speed_candidates, xray, settings.speed_workers, settings.speed_duration,
+                v, ranked_survivors, xray, settings.speed_workers, settings.speed_duration,
                 settings.timeout, settings.download_mb, settings.upload_mb,
                 on_stage=on_stage, make_reporter=make_reporter,
             )
         except ScanInterrupted as interrupted:
-            tested = interrupted.results
-            txt, csvp = save_results(tested, output_dir, "clean_ips_full_interrupted", include_speed_errors=True, vless_config=v)
-            return tested, txt, csvp, "clean_ips_full_interrupted"
+            partial = interrupted.results if interrupted.results else ranked_survivors
+            return _save_stage_output(partial, output_dir, "clean_ips_full_interrupted", v, include_speed_errors=True)
 
         enrich_results_with_colo(v, tested, xray, workers=settings.speed_workers, timeout=settings.timeout)
         tested = sorted(tested, key=full_sort_key)
-        txt, csvp = save_results(tested, output_dir, "clean_ips_full_tested", include_speed_errors=True, vless_config=v)
-        return tested, txt, csvp, "clean_ips_full_tested"
+        return _save_stage_output(tested, output_dir, "clean_ips_full_tested", v, include_speed_errors=True)
 
     # Mode: Stability only
-    elif settings.post_scan_mode == "stability":
+    if mode == "stability":
         try:
             rechecked = run_stability_stage(
                 v, candidates, xray, settings.speed_workers, settings.timeout,
                 settings.ping_samples, settings.test_url, on_stage=on_stage, make_reporter=make_reporter,
             )
         except ScanInterrupted as interrupted:
-            rechecked = interrupted.results
-            txt, csvp = save_results(rechecked, output_dir, "clean_ips_rechecked_interrupted", vless_config=v)
-            return rechecked, txt, csvp, "clean_ips_rechecked_interrupted"
-
-        if settings.longevity_test:
-            survivors = [r for r in rechecked if r.ok and r.packet_loss < 100.0]
-            if survivors:
-                try:
-                    rechecked = run_longevity_stage(
-                        v, survivors, xray, min(settings.speed_workers, 5), settings.longevity_duration,
-                        settings.timeout, on_stage=on_stage, make_reporter=make_reporter, abort_event=abort_event,
-                    )
-                except ScanInterrupted as interrupted:
-                    rechecked = interrupted.results
-                    txt, csvp = save_results(rechecked, output_dir, "clean_ips_rechecked_interrupted", vless_config=v)
-                    return rechecked, txt, csvp, "clean_ips_rechecked_interrupted"
+            return _save_stage_output(interrupted.results or candidates, output_dir, "clean_ips_rechecked_interrupted", v)
 
         enrich_results_with_colo(v, rechecked, xray, workers=settings.speed_workers, timeout=settings.timeout)
-        txt, csvp = save_results(rechecked, output_dir, "clean_ips_rechecked", vless_config=v)
-        return rechecked, txt, csvp, "clean_ips_rechecked"
+        return _save_stage_output(rechecked, output_dir, "clean_ips_rechecked", v)
 
     # Mode: Longevity only
-    elif settings.post_scan_mode == "longevity":
+    if mode == "longevity":
         try:
             tested = run_longevity_stage(
                 v, candidates, xray, min(settings.speed_workers, 5), settings.longevity_duration,
                 settings.timeout, on_stage=on_stage, make_reporter=make_reporter, abort_event=abort_event,
             )
-            enrich_results_with_colo(v, tested, xray, workers=settings.speed_workers, timeout=settings.timeout)
-            txt, csvp = save_results(tested, output_dir, "clean_ips_longevity", vless_config=v)
-            return tested, txt, csvp, "clean_ips_longevity"
         except ScanInterrupted as interrupted:
-            tested = interrupted.results
-            txt, csvp = save_results(tested, output_dir, "clean_ips_longevity_interrupted", vless_config=v)
-            return tested, txt, csvp, "clean_ips_longevity_interrupted"
+            return _save_stage_output(interrupted.results or candidates, output_dir, "clean_ips_longevity_interrupted", v)
+
+        enrich_results_with_colo(v, tested, xray, workers=settings.speed_workers, timeout=settings.timeout)
+        return _save_stage_output(tested, output_dir, "clean_ips_longevity", v)
 
     # Mode: Speed only
-    elif settings.post_scan_mode == "speed":
-        try:
-            tested = run_speed_stage(
-                v, candidates, xray, settings.speed_workers, settings.speed_duration,
-                settings.timeout, settings.download_mb, settings.upload_mb,
-                on_stage=on_stage, make_reporter=make_reporter,
-            )
-            enrich_results_with_colo(v, tested, xray, workers=settings.speed_workers, timeout=settings.timeout)
-            txt, csvp = save_results(tested, output_dir, "clean_ips_speed_tested", include_speed_errors=True, vless_config=v)
-            return tested, txt, csvp, "clean_ips_speed_tested"
-        except ScanInterrupted as interrupted:
-            tested = interrupted.results
-            txt, csvp = save_results(tested, output_dir, "clean_ips_speed_tested_interrupted", include_speed_errors=True, vless_config=v)
-            return tested, txt, csvp, "clean_ips_speed_tested_interrupted"
+    try:
+        tested = run_speed_stage(
+            v, candidates, xray, settings.speed_workers, settings.speed_duration,
+            settings.timeout, settings.download_mb, settings.upload_mb,
+            on_stage=on_stage, make_reporter=make_reporter,
+        )
+    except ScanInterrupted as interrupted:
+        return _save_stage_output(interrupted.results or candidates, output_dir, "clean_ips_speed_tested_interrupted", v, include_speed_errors=True)
 
-    # Fallback / None
-    enrich_results_with_colo(v, working_results, xray, workers=min(settings.workers, 20), timeout=settings.timeout)
-    txt, csvp = save_results(working_results, output_dir, "clean_ips", vless_config=v)
-    return working_results, txt, csvp, "clean_ips"
+    enrich_results_with_colo(v, tested, xray, workers=settings.speed_workers, timeout=settings.timeout)
+    return _save_stage_output(tested, output_dir, "clean_ips_speed_tested", v, include_speed_errors=True)
 
 
 class ScannerEngine:

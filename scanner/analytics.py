@@ -52,7 +52,7 @@ def full_sort_key(r: ScanResult) -> Tuple[float, float, float, float, float, flo
 def longevity_sort_key(r: ScanResult) -> Tuple[float, float, float, str, int]:
     """Longevity test output: sustained first, lowest longevity loss, then lowest latency."""
     sustained_score = _sustained_rank(r.sustained)
-    loss = r.longevity_loss if r.longevity_loss is not None else 0.0
+    loss = r.longevity_loss if r.longevity_loss is not None else (0.0 if r.sustained is True else 100.0)
     latency = r.latency_ms if r.latency_ms is not None else 10**12
     return (sustained_score, loss, latency, r.ip, r.port)
 
@@ -118,15 +118,25 @@ def get_smart_recommendations(
     if not ok:
         return []
 
+    ok_sorted = sorted(
+        ok,
+        key=lambda r: (
+            _sustained_rank(r.sustained),
+            r.packet_loss,
+            r.latency_ms if r.latency_ms is not None else 9999.0,
+        ),
+    )
+
     recs: List[SmartRecommendation] = []
 
     # 1. Best for Gaming:
-    # Primary criteria: 0% packet loss (or minimum possible), lowest jitter, lowest latency
-    has_stability = any(r.jitter_ms is not None or r.recheck_total > 0 for r in ok)
+    # Primary criteria: sustained connection, minimum packet loss, lowest jitter, lowest latency
+    has_stability = any(r.jitter_ms is not None or r.recheck_total > 0 for r in ok_sorted)
     if has_stability:
         gaming_sorted = sorted(
-            ok,
+            ok_sorted,
             key=lambda r: (
+                _sustained_rank(r.sustained),
                 r.packet_loss,
                 r.jitter_ms if r.jitter_ms is not None else 9999.0,
                 r.latency_ms if r.latency_ms is not None else 9999.0,
@@ -146,8 +156,7 @@ def get_smart_recommendations(
             )
         )
     else:
-        gaming_sorted = sorted(ok, key=lambda r: r.latency_ms if r.latency_ms is not None else 9999.0)
-        best_g = gaming_sorted[0]
+        best_g = ok_sorted[0]
         up_txt = f" | Up: {best_g.upload_mbps:.1f}M" if best_g.upload_mbps is not None else ""
         drop_g = " | Anti-Drop" if best_g.sustained is True else ""
         recs.append(
@@ -162,12 +171,13 @@ def get_smart_recommendations(
 
     # 2. Best for Instagram, YouTube & Video Streaming:
     # Primary criteria: Highest download speed (Mbps) + upload speed for stories
-    has_speed = any(r.speed_mbps is not None and r.speed_mbps > 0 for r in ok)
+    has_speed = any(r.speed_mbps is not None and r.speed_mbps > 0 for r in ok_sorted)
     if has_speed:
-        insta_candidates = [r for r in ok if r.speed_mbps is not None and r.speed_mbps > 0]
+        insta_candidates = [r for r in ok_sorted if r.speed_mbps is not None and r.speed_mbps > 0]
         insta_sorted = sorted(
             insta_candidates,
             key=lambda r: (
+                _sustained_rank(r.sustained),
                 -(r.speed_mbps or 0.0),
                 -(r.upload_mbps or 0.0),
                 r.packet_loss,
@@ -189,7 +199,7 @@ def get_smart_recommendations(
             )
         )
     else:
-        alt = ok[1] if len(ok) > 1 else ok[0]
+        alt = ok_sorted[1] if len(ok_sorted) > 1 else ok_sorted[0]
         recs.append(
             SmartRecommendation(
                 category="Streaming",
@@ -201,10 +211,10 @@ def get_smart_recommendations(
         )
 
     # 3. Best for General Browsing / Telegram:
-    if len(ok) >= 3:
+    if len(ok_sorted) >= 3:
         chosen_endpoints = {r.result.endpoint for r in recs}
-        remaining = [r for r in ok if r.endpoint not in chosen_endpoints]
-        best_gen = remaining[0] if remaining else ok[0]
+        remaining = [r for r in ok_sorted if r.endpoint not in chosen_endpoints]
+        best_gen = remaining[0] if remaining else ok_sorted[0]
         drop_badge = " | Anti-Drop" if best_gen.sustained is True else ""
         recs.append(
             SmartRecommendation(
@@ -217,9 +227,9 @@ def get_smart_recommendations(
         )
 
     # 4. Best Anti-Drop / DPI Endurance:
-    has_longevity = any(r.sustained is not None for r in ok)
+    has_longevity = any(r.sustained is not None for r in ok_sorted)
     if has_longevity:
-        sustained_candidates = [r for r in ok if r.sustained is True]
+        sustained_candidates = [r for r in ok_sorted if r.sustained is True]
         if sustained_candidates:
             best_anti = sorted(
                 sustained_candidates,
@@ -229,7 +239,7 @@ def get_smart_recommendations(
                     r.latency_ms if r.latency_ms is not None else 9999.0,
                 ),
             )[0]
-            spd = f" | {best_anti.speed_mbps:.1f} Mbps" if best_anti.speed_mbps else ""
+            spd = f" | {best_anti.speed_mbps:.1f} Mbps" if best_anti.speed_mbps is not None else ""
             recs.append(
                 SmartRecommendation(
                     category="Anti-Drop",

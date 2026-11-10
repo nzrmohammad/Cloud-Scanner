@@ -1,15 +1,33 @@
 from pathlib import Path
-from urllib.parse import parse_qs, quote, unquote, urlencode, urlparse
+from typing import Dict, Union
+from urllib.parse import quote, unquote, urlencode, urlparse
 
 from scanner.constants import (
     DEFAULT_CONFIG_FILENAME,
     DEFAULT_CONFIG_TEMPLATE,
     app_dir,
+    format_host_port,
 )
 from scanner.logger import get_logger
 from scanner.models import AppSettings, VlessConfig
 
 logger = get_logger("config")
+
+
+def _parse_query_params(raw_query: str) -> Dict[str, str]:
+    """Parse URI query string preserving '+' literally and decoding percent-escapes once."""
+    query: Dict[str, str] = {}
+    if not raw_query:
+        return query
+    for part in raw_query.split("&"):
+        if not part:
+            continue
+        key_raw, sep, val_raw = part.partition("=")
+        key = unquote(key_raw)
+        val = unquote(val_raw) if sep else ""
+        if key:
+            query[key] = val
+    return query
 
 
 def parse_vless(uri_or_file: str) -> VlessConfig:
@@ -21,13 +39,13 @@ def parse_vless(uri_or_file: str) -> VlessConfig:
     if not value.startswith("vless://"):
         raise ValueError("VLESS config must start with vless:// or be a file containing a vless:// link.")
     parsed = urlparse(value)
-    uuid = parsed.username or parsed.netloc.split("@")[0]
+    userinfo = parsed.netloc.rsplit("@", 1)[0] if "@" in parsed.netloc else ""
+    uuid = unquote(parsed.username or userinfo)
     host = parsed.hostname or ""
     port = parsed.port or 443
     if not uuid or not host:
         raise ValueError("Invalid VLESS link: missing UUID or server address.")
-    query_multi = parse_qs(parsed.query, keep_blank_values=True)
-    query = {k: unquote(v[-1]) if v else "" for k, v in query_multi.items()}
+    query = _parse_query_params(parsed.query)
     remark = unquote(parsed.fragment or "RKh-CFS")
     return VlessConfig(raw=value, uuid=uuid, host=host, port=port, remark=remark, query=query)
 
@@ -35,19 +53,27 @@ def parse_vless(uri_or_file: str) -> VlessConfig:
 def make_vless_link(v: VlessConfig, server_ip: str, port: int, remark_extra: str = "") -> str:
     """Build a complete ready-to-import vless:// URI with clean IP, port, and remark."""
     query_params = dict(v.query)
-    q_str = urlencode(query_params)
+    q_str = urlencode(query_params, quote_via=quote)
     base_remark = v.remark or "CleanIP"
-    if remark_extra:
-        full_remark = f"{base_remark}-{server_ip}:{port}-{remark_extra}"
-    else:
-        full_remark = f"{base_remark}-{server_ip}:{port}"
-    return f"vless://{v.uuid}@{server_ip}:{port}?{q_str}#{quote(full_remark)}"
+    endpoint = format_host_port(server_ip, port)
+    full_remark = f"{base_remark}-{endpoint}-{remark_extra}" if remark_extra else f"{base_remark}-{endpoint}"
+    return f"vless://{v.uuid}@{endpoint}?{q_str}#{quote(full_remark)}"
+
+
+def _parse_bounded_int(key: str, val: str, min_val: int) -> int | None:
+    """Parse an integer config setting safely, logging a warning if malformed."""
+    try:
+        parsed = int(float(val)) if "." in val else int(val)
+    except ValueError:
+        logger.warning("Ignoring non-numeric setting %s = %r in config.txt", key, val)
+        return None
+    return max(min_val, parsed)
 
 
 class ConfigManager:
     """Manages configuration files and application settings."""
 
-    def __init__(self, filename: str = DEFAULT_CONFIG_FILENAME):
+    def __init__(self, filename: Union[str, Path] = DEFAULT_CONFIG_FILENAME):
         self.config_path = app_dir() / filename
 
     def generate_default_config(self, vless: str = "") -> None:
@@ -99,11 +125,13 @@ class ConfigManager:
                             if parsed_ports:
                                 settings.ports = parsed_ports
                     elif key in ("workers", "concurrency"):
-                        if val.isdigit():
-                            settings.workers = max(1, int(val))
+                        parsed_int = _parse_bounded_int(key, val, 1)
+                        if parsed_int is not None:
+                            settings.workers = parsed_int
                     elif key == "timeout":
-                        if val.isdigit():
-                            settings.timeout = max(1, int(val))
+                        parsed_int = _parse_bounded_int(key, val, 1)
+                        if parsed_int is not None:
+                            settings.timeout = parsed_int
                     elif key in ("tcp_prefilter", "prefilter"):
                         settings.tcp_prefilter = val.lower() in ("true", "1", "yes", "on")
                     elif key in ("test_url", "url"):
@@ -112,8 +140,10 @@ class ConfigManager:
                     elif key in ("max_targets", "max_hosts", "target_limit"):
                         if val.lower() in ("0", "unlimited", "none", "all", "inf", "infinity"):
                             settings.max_targets = 0
-                        elif val.isdigit():
-                            settings.max_targets = max(0, int(val))
+                        else:
+                            parsed_int = _parse_bounded_int(key, val, 0)
+                            if parsed_int is not None:
+                                settings.max_targets = parsed_int
                     elif key == "output_dir":
                         if val:
                             settings.output_dir = Path(val)
@@ -124,28 +154,36 @@ class ConfigManager:
                     elif key in ("top_targets", "top_count"):
                         if val.lower() in ("0", "unlimited", "none", "all", "inf", "infinity"):
                             settings.top_targets = 0
-                        elif val.isdigit():
-                            settings.top_targets = max(0, int(val))
+                        else:
+                            parsed_int = _parse_bounded_int(key, val, 0)
+                            if parsed_int is not None:
+                                settings.top_targets = parsed_int
                     elif key in ("ping_samples", "samples"):
-                        if val.isdigit():
-                            settings.ping_samples = max(2, int(val))
+                        parsed_int = _parse_bounded_int(key, val, 2)
+                        if parsed_int is not None:
+                            settings.ping_samples = parsed_int
                     elif key in ("longevity_test", "anti_drop", "anti_drop_test"):
                         settings.longevity_test = val.lower() in ("true", "1", "yes", "on")
                     elif key in ("longevity_duration", "anti_drop_duration"):
-                        if val.isdigit():
-                            settings.longevity_duration = max(5, int(val))
+                        parsed_int = _parse_bounded_int(key, val, 5)
+                        if parsed_int is not None:
+                            settings.longevity_duration = parsed_int
                     elif key in ("download_mb", "speed_mb"):
-                        if val.isdigit():
-                            settings.download_mb = max(0, int(val))
+                        parsed_int = _parse_bounded_int(key, val, 0)
+                        if parsed_int is not None:
+                            settings.download_mb = parsed_int
                     elif key in ("upload_mb", "speed_upload_mb"):
-                        if val.isdigit():
-                            settings.upload_mb = max(0, int(val))
+                        parsed_int = _parse_bounded_int(key, val, 0)
+                        if parsed_int is not None:
+                            settings.upload_mb = parsed_int
                     elif key in ("speed_duration", "duration"):
-                        if val.isdigit():
-                            settings.speed_duration = max(1, int(val))
+                        parsed_int = _parse_bounded_int(key, val, 1)
+                        if parsed_int is not None:
+                            settings.speed_duration = parsed_int
                     elif key == "speed_workers":
-                        if val.isdigit():
-                            settings.speed_workers = max(1, int(val))
+                        parsed_int = _parse_bounded_int(key, val, 1)
+                        if parsed_int is not None:
+                            settings.speed_workers = parsed_int
                 elif line.startswith("vless://") and not settings.vless_raw:
                     settings.vless_raw = line
 
@@ -164,7 +202,8 @@ class ConfigManager:
                 new_lines = []
                 for line in lines:
                     stripped = line.strip()
-                    if stripped.startswith("vless") and "=" in stripped:
+                    key_part, eq, _ = stripped.partition("=")
+                    if eq and key_part.strip().lower() == "vless":
                         new_lines.append(f"vless = {raw_vless.strip()}")
                         found = True
                     else:

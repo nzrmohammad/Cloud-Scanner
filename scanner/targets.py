@@ -2,13 +2,22 @@ import ipaddress
 import re
 from bisect import bisect_right
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Tuple
+from typing import Dict, Iterable, List, Optional, Set, Tuple
 
-from scanner.constants import MAX_DEFAULT_HOSTS, app_dir, isp_root
+from scanner.constants import (
+    MAX_DEFAULT_HOSTS,
+    SAFE_AUTO_EXPAND_LIMIT,
+    SAFE_IPV6_AUTO_EXPAND_LIMIT,
+    app_dir,
+    format_host_port,
+    isp_root,
+)
 from scanner.logger import get_logger
 from scanner.models import TargetSource
 
 logger = get_logger("targets")
+
+_IP_SYNTAX_RE = re.compile(r"^[\da-fA-F:\.\[\]/\-]+$")
 
 
 def clean_target_token(item: str) -> str:
@@ -19,6 +28,7 @@ def clean_target_token(item: str) -> str:
     for marker in ("#", "//"):
         if marker in item:
             item = item.split(marker, 1)[0].strip()
+    item = re.sub(r"\s*-\s*", "-", item)
     item = item.replace("*", " ")
     parts = re.split(r"[\s,;]+", item)
     return parts[0].strip() if parts else ""
@@ -68,29 +78,50 @@ def parse_ip_and_port(token: str) -> Tuple[str, Optional[int]]:
     return token, None
 
 
-def _resolve_target_file(raw_item: str, token: str) -> Optional[Path]:
+def _build_isp_file_index(root: Path) -> List[Path]:
+    """Return all packaged ISP txt files once for fast in-memory matching."""
+    if not root.exists():
+        return []
+    return [p for p in root.rglob("*.txt") if p.is_file()]
+
+
+def _resolve_target_file(raw_item: str, token: str, isp_index: Optional[List[Path]] = None) -> Optional[Path]:
     """Look for an existing file directly, in app_dir, or matching in ip-ranges."""
     p = Path(raw_item)
-    if p.is_file():
-        return p
+    try:
+        if p.is_file():
+            return p
+    except OSError:
+        pass
     alt = app_dir() / raw_item
-    if alt.is_file():
-        return alt
-    root = isp_root()
-    if root.exists():
-        for cand in (raw_item, f"{raw_item}.txt", token, f"{token}.txt"):
-            if cand:
-                matches = list(root.rglob(cand))
-                if matches and matches[0].is_file():
-                    return matches[0]
-        m = re.match(r"^(?:as|asn)?(\d{2,7})$", token, re.IGNORECASE)
-        if m:
-            num = m.group(1)
-            matches = [f for f in root.rglob(f"*{num}*.txt") if f.is_file() and "ipv6" not in f.name.lower()]
-            if not matches:
-                matches = [f for f in root.rglob(f"*{num}*.txt") if f.is_file()]
-            if matches:
-                return matches[0]
+    try:
+        if alt.is_file():
+            return alt
+    except OSError:
+        pass
+
+    # Skip slow catalog searches when the token already looks like an IP/CIDR/range literal
+    if token and _IP_SYNTAX_RE.match(token) and ("." in token or ":" in token):
+        return None
+
+    files = isp_index if isp_index is not None else _build_isp_file_index(isp_root())
+    if not files:
+        return None
+
+    candidates = {c.lower() for c in (raw_item, f"{raw_item}.txt", token, f"{token}.txt") if c}
+    for f in files:
+        if f.name.lower() in candidates or f.stem.lower() in candidates:
+            return f
+
+    m = re.match(r"^(?:as|asn)?(\d{2,7})$", token, re.IGNORECASE)
+    if m:
+        num = m.group(1)
+        non_v6 = [f for f in files if num in f.name and "ipv6" not in f.name.lower()]
+        if non_v6:
+            return non_v6[0]
+        any_match = [f for f in files if num in f.name]
+        if any_match:
+            return any_match[0]
     return None
 
 
@@ -113,46 +144,86 @@ def _fetch_asn_prefixes(token: str) -> List[str]:
         return []
 
 
-def _target_sources(items: Iterable[str]) -> List[TargetSource]:
+def _parse_single_target_source(token: str) -> Optional[TargetSource]:
+    """Parse a single CIDR, range (A.B.C.D-W.X.Y.Z or A.B.C.D-E), or IP[:port] into a TargetSource."""
+    if "/" in token:
+        net = ipaddress.ip_network(token, strict=False)
+        start, end = _network_host_bounds(net)
+        return TargetSource(start=start, end=end, version=net.version, label=token) if end >= start else None
+
+    if "-" in token:
+        start_s, end_s = [x.strip() for x in token.split("-", 1)]
+        start_ip = ipaddress.ip_address(start_s)
+        if end_s.isdigit() and start_ip.version == 4:
+            last_octet = int(end_s)
+            if not 0 <= last_octet <= 255:
+                raise ValueError(f"Invalid IP range: {token}")
+            end_s = f"{start_s.rsplit('.', 1)[0]}.{last_octet}"
+        end_ip = ipaddress.ip_address(end_s)
+        if start_ip.version != end_ip.version or int(end_ip) < int(start_ip):
+            raise ValueError(f"Invalid IP range: {token}")
+        return TargetSource(start=int(start_ip), end=int(end_ip), version=start_ip.version, label=token)
+
+    host_str, port = parse_ip_and_port(token)
+    ip = ipaddress.ip_address(host_str)
+    return TargetSource(start=int(ip), end=int(ip), version=ip.version, label=token, port=port)
+
+
+def _target_sources(
+    items: Iterable[str],
+    allow_file_lookup: bool = True,
+    _visited_files: Optional[Set[Path]] = None,
+    _isp_index: Optional[List[Path]] = None,
+) -> List[TargetSource]:
     sources: List[TargetSource] = []
+    visited = _visited_files if _visited_files is not None else set()
+    isp_index = _isp_index
+
     for item in items:
         raw_item = str(item).strip().strip('"').strip("'")
         if not raw_item:
             continue
         token = clean_target_token(raw_item)
 
-        matched_file = _resolve_target_file(raw_item, token)
-        if matched_file and matched_file.is_file():
-            lines = matched_file.read_text(encoding="utf-8", errors="ignore").splitlines()
-            sources.extend(_target_sources(lines))
-            continue
+        if allow_file_lookup:
+            if isp_index is None and not (token and _IP_SYNTAX_RE.match(token) and ("." in token or ":" in token)):
+                isp_index = _build_isp_file_index(isp_root())
+            matched_file = _resolve_target_file(raw_item, token, isp_index=isp_index)
+            if matched_file and matched_file.is_file():
+                resolved = matched_file.resolve()
+                if resolved in visited:
+                    continue
+                visited.add(resolved)
+                lines = matched_file.read_text(encoding="utf-8", errors="ignore").splitlines()
+                sources.extend(_target_sources(lines, allow_file_lookup=False, _visited_files=visited, _isp_index=isp_index))
+                continue
 
         if not token:
             continue
 
+        # Fast-path IP / CIDR / range parsing before external ASN HTTP calls
+        try:
+            src = _parse_single_target_source(token)
+            if src is not None:
+                sources.append(src)
+            continue
+        except ValueError:
+            pass
+
         asn_prefixes = _fetch_asn_prefixes(token)
         if asn_prefixes:
-            sources.extend(_target_sources(asn_prefixes))
+            sources.extend(_target_sources(asn_prefixes, allow_file_lookup=False, _visited_files=visited, _isp_index=isp_index))
             continue
 
-        if "/" in token:
-            net = ipaddress.ip_network(token, strict=False)
-            start, end = _network_host_bounds(net)
-            if end >= start:
-                sources.append(TargetSource(start=start, end=end, version=net.version, label=token))
-            continue
-        if "-" in token:
-            start_s, end_s = [x.strip() for x in token.split("-", 1)]
-            start_ip, end_ip = ipaddress.ip_address(start_s), ipaddress.ip_address(end_s)
-            if start_ip.version != end_ip.version or int(end_ip) < int(start_ip):
-                raise ValueError(f"Invalid IP range: {token}")
-            sources.append(TargetSource(start=int(start_ip), end=int(end_ip), version=start_ip.version, label=token))
-            continue
+        # Re-raise descriptive ValueError on invalid target token
+        _parse_single_target_source(token)
 
-        host_str, port = parse_ip_and_port(token)
-        ip = ipaddress.ip_address(host_str)
-        sources.append(TargetSource(start=int(ip), end=int(ip), version=ip.version, label=token, port=port))
     return sources
+
+
+def _format_target_item(ip_int: int, port: Optional[int]) -> str:
+    ip_str = str(ipaddress.ip_address(ip_int))
+    return format_host_port(ip_str, port) if port is not None else ip_str
 
 
 def _expand_sources_exact(sources: List[TargetSource], max_hosts: Optional[int] = None) -> List[str]:
@@ -160,12 +231,7 @@ def _expand_sources_exact(sources: List[TargetSource], max_hosts: Optional[int] 
     seen = set()
     for src in sources:
         for n in range(src.start, src.end + 1):
-            ip_obj = ipaddress.ip_address(n)
-            ip_str = str(ip_obj)
-            if src.port is not None:
-                item_str = f"[{ip_str}]:{src.port}" if ip_obj.version == 6 else f"{ip_str}:{src.port}"
-            else:
-                item_str = ip_str
+            item_str = _format_target_item(n, src.port)
             if item_str in seen:
                 continue
             seen.add(item_str)
@@ -183,22 +249,27 @@ def _sample_sources_evenly(sources: List[TargetSource], max_hosts: int) -> List[
     if not sources or max_hosts <= 0:
         return []
     totals: Dict[int, int] = {}
+    weights: Dict[int, int] = {}
     by_version: Dict[int, List[TargetSource]] = {}
     for src in sources:
         totals[src.version] = totals.get(src.version, 0) + src.size
+        # Cap per-range weight when splitting budget between IPv4 and IPv6 so huge IPv6 subnets do not starve IPv4
+        weights[src.version] = weights.get(src.version, 0) + min(src.size, 256)
         by_version.setdefault(src.version, []).append(src)
-    grand_total = sum(totals.values())
+    grand_weight = sum(weights.values())
     allocations: Dict[int, int] = {}
     used = 0
     remainders: List[Tuple[float, int]] = []
-    for version, total in totals.items():
-        raw = (max_hosts * total) / grand_total
-        alloc = max(1, int(raw))
+    for version, weight in weights.items():
+        raw = (max_hosts * weight) / grand_weight
+        alloc = min(totals[version], max(1, int(raw)))
         allocations[version] = alloc
         used += alloc
         remainders.append((raw - int(raw), version))
     while used > max_hosts:
         cand_v: Optional[int] = max((v for v, a in allocations.items() if a > 1), key=lambda v: allocations[v], default=None)
+        if cand_v is None:
+            cand_v = max((v for v, a in allocations.items() if a > 0), key=lambda v: allocations[v], default=None)
         if cand_v is None:
             break
         allocations[cand_v] -= 1
@@ -206,8 +277,9 @@ def _sample_sources_evenly(sources: List[TargetSource], max_hosts: int) -> List[
     for _, version in sorted(remainders, reverse=True):
         if used >= max_hosts:
             break
-        allocations[version] += 1
-        used += 1
+        if allocations[version] < totals[version]:
+            allocations[version] += 1
+            used += 1
 
     out: List[str] = []
     seen = set()
@@ -230,12 +302,7 @@ def _sample_sources_evenly(sources: List[TargetSource], max_hosts: int) -> List[
             prev = cumulative[idx - 1] if idx > 0 else 0
             src = version_sources[idx]
             n = src.start + (pos - prev)
-            ip_obj = ipaddress.ip_address(n)
-            ip_str = str(ip_obj)
-            if src.port is not None:
-                item_str = f"[{ip_str}]:{src.port}" if ip_obj.version == 6 else f"{ip_str}:{src.port}"
-            else:
-                item_str = ip_str
+            item_str = _format_target_item(n, src.port)
             if item_str not in seen:
                 seen.add(item_str)
                 out.append(item_str)
@@ -252,7 +319,30 @@ def expand_targets(
     total = sum(src.size for src in sources)
     limit = None if max_hosts is None or max_hosts <= 0 else int(max_hosts)
     if limit is None:
-        return _expand_sources_exact(sources, None)
+        v4_sources = [s for s in sources if s.version == 4]
+        v6_sources = [s for s in sources if s.version == 6]
+        v4_total = sum(s.size for s in v4_sources)
+        v6_total = sum(s.size for s in v6_sources)
+        if v4_total <= SAFE_AUTO_EXPAND_LIMIT and v6_total <= SAFE_IPV6_AUTO_EXPAND_LIMIT:
+            return _expand_sources_exact(sources, None)
+        if not sample_if_too_many:
+            raise ValueError(
+                f"Target range is too large ({total} addresses). Specify a positive max_targets or enable sampling."
+            )
+        out: List[str] = []
+        if v4_sources:
+            out.extend(
+                _expand_sources_exact(v4_sources, None)
+                if v4_total <= SAFE_AUTO_EXPAND_LIMIT
+                else _sample_sources_evenly(v4_sources, SAFE_AUTO_EXPAND_LIMIT)
+            )
+        if v6_sources:
+            out.extend(
+                _expand_sources_exact(v6_sources, None)
+                if v6_total <= SAFE_IPV6_AUTO_EXPAND_LIMIT
+                else _sample_sources_evenly(v6_sources, SAFE_IPV6_AUTO_EXPAND_LIMIT)
+            )
+        return out
     if total <= limit:
         return _expand_sources_exact(sources, limit)
     if not sample_if_too_many:

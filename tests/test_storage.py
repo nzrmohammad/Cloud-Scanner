@@ -204,3 +204,18 @@ def test_save_scan_summary_report():
         assert "22.30 Mbps" in text
         assert "FRA" in text
 
+
+def test_save_results_none_longevity_loss_no_crash():
+    with tempfile.TemporaryDirectory() as td:
+        out_dir = Path(td)
+        v = VlessConfig(uuid="test-uuid", host="test.com", port=443)
+        results = [
+            ScanResult(ip="104.16.1.1", port=443, ok=True, latency_ms=50.0, sustained=False, longevity_loss=None),
+            ScanResult(ip="104.16.1.2", port=8443, ok=True, latency_ms=55.0, sustained=None, longevity_loss=None),
+        ]
+        txt, csv_path = save_results(results, out_dir, "clean_ips_longevity", vless_config=v)
+        assert txt.exists() and csv_path.exists()
+        assert "DROPPED" in txt.read_text(encoding="utf-8")
+        report = save_scan_summary_report(results, out_dir, vless_config=v)
+        assert report.exists()
+

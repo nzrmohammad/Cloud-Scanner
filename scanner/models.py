@@ -5,8 +5,11 @@ from typing import Any, Dict, List, Optional
 from scanner.constants import (
     DEFAULT_CONCURRENCY,
     DEFAULT_LONGEVITY_DURATION,
+    DEFAULT_TIMEOUT,
     DEFAULT_URL,
+    MAX_DEFAULT_HOSTS,
     app_dir,
+    format_host_port,
 )
 
 
@@ -59,7 +62,7 @@ class ScanResult:
 
     @property
     def endpoint(self) -> str:
-        return f"{self.ip}:{self.port}"
+        return format_host_port(self.ip, self.port)
 
 
 @dataclass(frozen=True)
@@ -80,20 +83,20 @@ class AppSettings:
     vless_raw: str = ""
     ports: List[int] = field(default_factory=lambda: [443, 8443, 2053, 2083, 2087, 2096])
     workers: int = DEFAULT_CONCURRENCY
-    timeout: int = 2
+    timeout: int = DEFAULT_TIMEOUT
     tcp_prefilter: bool = True
     test_url: str = DEFAULT_URL
-    max_targets: int = 0  # 0 = unlimited
+    max_targets: int = MAX_DEFAULT_HOSTS
     output_dir: Path = field(default_factory=lambda: app_dir() / "results")
     post_scan_mode: str = "full"  # full, stability, speed, longevity, none
     top_targets: int = 30
     ping_samples: int = 8
     longevity_test: bool = True
     longevity_duration: int = DEFAULT_LONGEVITY_DURATION
-    download_mb: int = 5
+    download_mb: int = 3
     upload_mb: int = 1
     speed_duration: int = 5
-    speed_workers: int = 5
+    speed_workers: int = 6
 
 
 @dataclass

@@ -70,3 +70,13 @@ def test_latency_sort_key_none_handling():
     sorted_res = sorted([r_none, r_fast], key=latency_sort_key)
     assert sorted_res[0].ip == "1.1.1.1"
     assert sorted_res[1].ip == "1.1.1.2"
+
+
+def test_smart_recommendations_prefers_sustained_and_sorted_fallbacks():
+    r_slow_bad = ScanResult(ip="1.1.1.1", port=443, ok=True, latency_ms=500.0, jitter_ms=1.0, packet_loss=0.0, sustained=False)
+    r_fast_good = ScanResult(ip="1.1.1.2", port=443, ok=True, latency_ms=50.0, jitter_ms=5.0, packet_loss=0.0, sustained=True)
+    r_mid_good = ScanResult(ip="1.1.1.3", port=443, ok=True, latency_ms=80.0, jitter_ms=6.0, packet_loss=0.0, sustained=True)
+    recs = get_smart_recommendations([r_slow_bad, r_mid_good, r_fast_good])
+    by_cat = {rec.category: rec.result.ip for rec in recs}
+    assert by_cat["Gaming"] == "1.1.1.2"
+    assert by_cat["Streaming"] == "1.1.1.3"

@@ -11,6 +11,16 @@ if sys.platform == "win32":
             sys.stderr.reconfigure(encoding="utf-8", errors="replace")
     except Exception:
         pass
+    try:
+        import ctypes
+
+        _kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+        _stdout_handle = _kernel32.GetStdHandle(-11)  # STD_OUTPUT_HANDLE
+        _mode = ctypes.c_ulong()
+        if _kernel32.GetConsoleMode(_stdout_handle, ctypes.byref(_mode)):
+            _kernel32.SetConsoleMode(_stdout_handle, _mode.value | 0x0004)  # ENABLE_VIRTUAL_TERMINAL_PROCESSING
+    except Exception:
+        pass
 
 from scanner.constants import APP_CHANNEL, APP_HEADER, APP_NAME, APP_VERSION
 from scanner.models import NavigationBack, ScanResult
@@ -70,7 +80,7 @@ def tui_screen() -> Generator[None, None, None]:
     """
     if RICH and console is not None and getattr(console, "is_terminal", False):
         try:
-            with console.screen():
+            with console.screen(hide_cursor=False):
                 yield
         finally:
             try:
@@ -89,17 +99,60 @@ def tui_screen() -> Generator[None, None, None]:
                     pass
 
 
+def _win32_clear_console_buffer() -> bool:
+    """Clear the entire Windows console screen buffer via Win32 API (no subshell)."""
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        class _COORD(ctypes.Structure):
+            _fields_ = [("X", ctypes.c_short), ("Y", ctypes.c_short)]
+
+        class _SMALL_RECT(ctypes.Structure):
+            _fields_ = [
+                ("Left", ctypes.c_short),
+                ("Top", ctypes.c_short),
+                ("Right", ctypes.c_short),
+                ("Bottom", ctypes.c_short),
+            ]
+
+        class _CONSOLE_SCREEN_BUFFER_INFO(ctypes.Structure):
+            _fields_ = [
+                ("dwSize", _COORD),
+                ("dwCursorPosition", _COORD),
+                ("wAttributes", wintypes.WORD),
+                ("srWindow", _SMALL_RECT),
+                ("dwMaximumWindowSize", _COORD),
+            ]
+
+        kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+        handle = kernel32.GetStdHandle(-11)
+        csbi = _CONSOLE_SCREEN_BUFFER_INFO()
+        if not kernel32.GetConsoleScreenBufferInfo(handle, ctypes.byref(csbi)):
+            return False
+        total_cells = csbi.dwSize.X * csbi.dwSize.Y
+        origin = _COORD(0, 0)
+        written = wintypes.DWORD()
+        kernel32.FillConsoleOutputCharacterW(handle, " ", total_cells, origin, ctypes.byref(written))
+        kernel32.FillConsoleOutputAttribute(handle, csbi.wAttributes, total_cells, origin, ctypes.byref(written))
+        kernel32.SetConsoleCursorPosition(handle, origin)
+        return True
+    except Exception:
+        return False
+
+
 def clear_screen() -> None:
-    """Reliably clear the terminal screen and scrollback buffer across Windows and Unix."""
-    if os.name == "nt":
-        try:
-            os.system("cls")
+    """Reliably clear the entire terminal viewport and scrollback without sub-shells."""
+    try:
+        sys.stdout.flush()
+    except Exception:
+        pass
+    if os.name == "nt" and (not RICH or console is None or getattr(console, "legacy_windows", False)):
+        if _win32_clear_console_buffer():
             return
-        except Exception:
-            pass
     if sys.stdout.isatty():
         try:
-            sys.stdout.write("\033[2J\033[H\033[3J")
+            sys.stdout.write("\033[2J\033[3J\033[H")
             sys.stdout.flush()
             return
         except Exception:
@@ -208,6 +261,8 @@ def prompt_int(message: str, default: int, min_value: int = 1, max_value: Option
             if value < min_value or (max_value is not None and value > max_value):
                 raise ValueError
             return value
+        except (EOFError, KeyboardInterrupt):
+            raise
         except Exception:
             cprint(f"Please enter a number between {min_value} and {max_value or 'unlimited'}.", "yellow")
 
@@ -245,6 +300,10 @@ def prompt_int_nav(message: str, default: int, min_value: int = 1, max_value: Op
                 raise ValueError
             return value
         except NavigationBack:
+            raise
+        except EOFError:
+            if allow_back:
+                raise NavigationBack from None
             raise
         except Exception:
             cprint(f"Please enter a number between {min_value} and {max_value or 'unlimited'}, or type b to go back.", "yellow")
@@ -298,9 +357,10 @@ def progress_reporter(stage_title: str, total: int, mode: str = "latency") -> Ge
             task = progress.add_task(stage_title, total=total)
 
             def _rich_cb(r: ScanResult, completed: int, total_items: int) -> None:
+                lat_txt = f"{r.latency_ms:.1f} ms" if r.latency_ms is not None else "-"
                 if mode == "latency":
                     if r.ok:
-                        console.print(f"[green]OK[/green]  {r.endpoint:<45} [bold]{r.latency_ms:.1f} ms[/bold]  HTTP {r.status_code}")
+                        console.print(f"[green]OK[/green]  {r.endpoint:<45} [bold]{lat_txt}[/bold]  HTTP {r.status_code or '-'}")
                 elif mode == "speed":
                     down_str = f"DL {r.speed_mbps:.2f} Mbps" if r.speed_mbps is not None else "DL -"
                     up_str = f"UP {r.upload_mbps:.2f} Mbps" if r.upload_mbps is not None else "UP -"
@@ -313,7 +373,7 @@ def progress_reporter(stage_title: str, total: int, mode: str = "latency") -> Ge
                     if r.ok and r.packet_loss < 100.0:
                         loss_txt = f" loss {r.packet_loss:.0f}%" if r.packet_loss is not None else ""
                         jit_txt = f" jit {r.jitter_ms:.1f}ms" if r.jitter_ms is not None else ""
-                        console.print(f"[bright_green]RE-OK[/bright_green] {r.endpoint:<38} [bold]{r.latency_ms:.1f} ms avg[/bold]{jit_txt}{loss_txt}  pass {r.recheck_passed}/{r.recheck_total}")
+                        console.print(f"[bright_green]RE-OK[/bright_green] {r.endpoint:<38} [bold]{lat_txt} avg[/bold]{jit_txt}{loss_txt}  pass {r.recheck_passed}/{r.recheck_total}")
                     else:
                         console.print(f"[red]DROP[/red]  {r.endpoint:<38} {r.error}")
                 elif mode == "longevity":
@@ -327,13 +387,14 @@ def progress_reporter(stage_title: str, total: int, mode: str = "latency") -> Ge
             yield _rich_cb
     else:
         def _fallback_cb(r: ScanResult, completed: int, total_items: int) -> None:
+            lat_txt = f"{r.latency_ms:.1f} ms" if r.latency_ms is not None else "-"
             if mode == "latency" and r.ok:
-                print(f"OK {r.endpoint:<45} {r.latency_ms:.1f} ms HTTP {r.status_code}")
+                print(f"OK {r.endpoint:<45} {lat_txt} HTTP {r.status_code or '-'}")
             elif mode == "speed":
                 down_str = f"DL {r.speed_mbps:.2f} Mbps" if r.speed_mbps is not None else "DL -"
                 print(f"SPD {r.endpoint:<45} {down_str}")
             elif mode == "recheck" and r.ok:
-                print(f"RE-OK {r.endpoint:<45} {r.latency_ms:.1f} ms")
+                print(f"RE-OK {r.endpoint:<45} {lat_txt}")
             elif mode == "longevity":
                 status = "SUSTAIN" if r.sustained else "DROP"
                 print(f"{status} {r.endpoint:<45}")

@@ -9,10 +9,10 @@ APP_URL = "https://t.me/Nzrmohammad"
 APP_HEADER = f"{APP_NAME} {APP_VERSION} | {APP_CHANNEL}"
 
 DEFAULT_CF_TLS_PORTS = (443, 8443, 2053, 2083, 2087, 2096)
-DEFAULT_CONCURRENCY = 25
-DEFAULT_TIMEOUT = 2
+DEFAULT_CONCURRENCY = 30
+DEFAULT_TIMEOUT = 3
 DEFAULT_TRIES = 1
-MAX_DEFAULT_HOSTS = 0
+MAX_DEFAULT_HOSTS = 2000
 
 DEFAULT_URL = "https://www.gstatic.com/generate_204"
 DEFAULT_SPEED_URL = "https://speed.cloudflare.com/__down?bytes={bytes}"
@@ -25,9 +25,19 @@ def mb_to_bytes(mb: int) -> int:
     return mb * NETWORK_BYTES_PER_MB
 
 
-DEFAULT_SPEED_BYTES = mb_to_bytes(5)
+DEFAULT_SPEED_BYTES = mb_to_bytes(3)
 DEFAULT_UPLOAD_BYTES = mb_to_bytes(1)
 DEFAULT_LONGEVITY_DURATION = 30
+SAFE_AUTO_EXPAND_LIMIT = 50_000
+SAFE_IPV6_AUTO_EXPAND_LIMIT = 2_000
+
+
+def format_host_port(host: str, port: int) -> str:
+    """Format an IP/host and port, wrapping bare IPv6 literals in brackets."""
+    clean = host.strip()
+    if ":" in clean and not clean.startswith("["):
+        return f"[{clean}]:{port}"
+    return f"{clean}:{port}"
 
 LATENCY_TEST_URLS = [
     ("Google generate_204", "https://www.gstatic.com/generate_204", "Fast & globally reliable (Recommended)"),
@@ -225,10 +235,10 @@ vless = {vless}
 ports = 443, 8443, 2053, 2083, 2087, 2096
 
 # Scan Speed / Workers (سرعت اسکن / تعداد ورکرها)
-workers = 25
+workers = 30
 
 # Timeout in seconds (مهلت اتصال به ثانیه)
-timeout = 2
+timeout = 3
 
 # Fast TCP Pre-filter (پیش‌فیلتر فوق سریع TCP)
 tcp_prefilter = true
@@ -237,8 +247,8 @@ tcp_prefilter = true
 test_url = https://www.gstatic.com/generate_204
 
 # Maximum target IPs to load/scan (حداکثر تعداد آی‌پی برای اسکن)
-# عدد 0 یا unlimited یعنی تمام آی‌پی‌ها بدون محدودیت اسکن شوند؛ یا یک عدد دلخواه (مثلاً 500 یا 1000)
-max_targets = 0
+# عدد 2000 برای رنج‌های بزرگ نمونه برداری متعادل انجام می‌دهد؛ عدد 0 یعنی نامحدود
+max_targets = 2000
 
 # ==============================================================
 # Quality, Anti-Drop & Speed Testing (تنظیمات تست کیفیت، عدم قطع و سرعت)
@@ -266,7 +276,7 @@ longevity_test = true
 longevity_duration = 30
 
 # Download test size in MB (حجم فایل دانلود تستی بر حسب مگابایت)
-download_mb = 5
+download_mb = 3
 
 # Upload test size in MB (حجم فایل آپلود تستی بر حسب مگابایت - عدد 0 یعنی غیرفعال)
 upload_mb = 1
@@ -275,7 +285,7 @@ upload_mb = 1
 speed_duration = 5
 
 # Speed test concurrency workers (تعداد ورکر همزمان برای تست سرعت)
-speed_workers = 5
+speed_workers = 6
 """
 
 

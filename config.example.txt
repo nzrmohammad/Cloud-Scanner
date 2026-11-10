@@ -11,10 +11,10 @@ vless = vless://your-uuid-here@your-domain.com:443?encryption=none&security=tls&
 ports = 443, 8443, 2053, 2083, 2087, 2096
 
 # Scan Concurrency / Workers
-workers = 25
+workers = 30
 
 # Timeout in seconds
-timeout = 2
+timeout = 3
 
 # Fast TCP Pre-filter (true/false)
 tcp_prefilter = true
@@ -22,8 +22,8 @@ tcp_prefilter = true
 # Latency Test URL
 test_url = https://www.gstatic.com/generate_204
 
-# Maximum target IPs to load/scan (0 or unlimited = scan all targets)
-max_targets = 0
+# Maximum target IPs to load/scan (0 = unlimited, 2000 recommended to sample huge ISP ranges quickly)
+max_targets = 2000
 
 # ==============================================================
 # Quality, Anti-Drop & Speed Testing Settings
@@ -48,8 +48,8 @@ longevity_test = true
 # Longevity test duration in seconds (continuous stream against DPI drop)
 longevity_duration = 30
 
-# Download test size in MB (e.g. 2-3 for ADSL, 5-10 for 4G/LTE, 25-50 for high-speed fiber)
-download_mb = 5
+# Download test size in MB (adaptively scaled based on line bandwidth)
+download_mb = 3
 
 # Upload test size in MB (0 = disable upload testing)
 upload_mb = 1
@@ -58,4 +58,4 @@ upload_mb = 1
 speed_duration = 5
 
 # Speed test concurrency workers
-speed_workers = 5
+speed_workers = 6

@@ -10,6 +10,7 @@ from scanner.ui.menus import (
 )
 from scanner.ui.screens import (
     ask_max_targets,
+    check_and_prompt_xray_update,
     choose_isp_category_tui,
     choose_latency_test_url_tui,
     handle_post_scan_testing_tui,
@@ -76,6 +77,7 @@ __all__ = [
     "post_scan_actions_menu",
     "make_active_settings_panel",
     "render_active_settings_panel",
+    "check_and_prompt_xray_update",
     "render_welcome_config_screen",
     "show_config_summary",
     "show_main_target_menu",

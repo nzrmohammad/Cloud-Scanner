@@ -42,3 +42,35 @@ def test_make_batch_xray_config(sample_vless):
     assert cfg["routing"]["rules"][0]["outboundTag"] == "proxy-0"
     assert cfg["routing"]["rules"][1]["inboundTag"] == ["socks-1"]
     assert cfg["routing"]["rules"][1]["outboundTag"] == "proxy-1"
+
+
+def test_version_comparison_and_asset_name():
+    from scanner.xray import get_platform_asset_name, is_newer_version, parse_version_tuple
+
+    assert parse_version_tuple("v26.3.27") == (26, 3, 27)
+    assert is_newer_version("v26.4.1", "26.3.27") is True
+    assert is_newer_version("v26.10.0", "26.3.27") is True
+    assert is_newer_version("v26.3.27", "26.3.27") is False
+    assert is_newer_version("v25.12.0", "26.3.27") is False
+    assert is_newer_version(None, "26.3.27") is False
+    asset = get_platform_asset_name()
+    assert asset.startswith("Xray-") and asset.endswith(".zip")
+
+
+def test_fetch_latest_xray_tag_head_and_fallback(monkeypatch):
+    import requests
+
+    from scanner.xray import fetch_latest_xray_tag
+
+    class MockHeadResp:
+        headers = {"Location": "https://github.com/XTLS/Xray-core/releases/tag/v26.4.5"}
+
+    monkeypatch.setattr(requests, "head", lambda *a, **kw: MockHeadResp())
+    assert fetch_latest_xray_tag(timeout=1.0) == "v26.4.5"
+
+    def raise_err(*a, **kw):
+        raise OSError("offline")
+
+    monkeypatch.setattr(requests, "head", raise_err)
+    monkeypatch.setattr(requests, "get", raise_err)
+    assert fetch_latest_xray_tag(timeout=1.0) is None

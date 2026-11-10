@@ -167,4 +167,95 @@ def test_run_concurrent_tasks_abort_event():
     assert ev.is_set() is True
 
 
+def test_summarize_latency_preserves_passing_status_code():
+    samples = [
+        ScanResult(ip="1.1.1.1", port=443, ok=False, status_code=None, error="Timeout"),
+        ScanResult(ip="1.1.1.1", port=443, ok=True, latency_ms=80.0, status_code=204),
+    ]
+    summary = summarize_latency(samples)
+    assert summary.ok is True
+    assert summary.status_code == 204
+
+
+def test_longevity_test_ip_abort_not_sustained(monkeypatch):
+    import tempfile
+    import threading
+    from pathlib import Path
+
+    from scanner.engine import longevity_test_ip
+    from scanner.models import VlessConfig
+
+    v = VlessConfig(uuid="dummy", host="test.com", port=443)
+    base = ScanResult(ip="1.1.1.1", port=443, ok=True)
+    ev = threading.Event()
+
+    class MockXray:
+        def __init__(self, *args, **kwargs):
+            self.proxies = {"http": "socks5://127.0.0.1:1080", "https": "socks5://127.0.0.1:1080"}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            pass
+
+    class MockStream:
+        status_code = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            pass
+
+        def close(self):
+            pass
+
+        def iter_content(self, chunk_size=32 * 1024):
+            yield b"\x00" * (128 * 1024)
+            ev.set()
+            yield b"\x00" * chunk_size
+
+    import requests
+
+    monkeypatch.setattr("scanner.engine.XrayProcess", MockXray)
+    monkeypatch.setattr(requests, "get", lambda *a, **kw: MockStream())
+
+    with tempfile.TemporaryDirectory() as td:
+        fake_xray = Path(td) / "xray"
+        fake_xray.touch()
+        res = longevity_test_ip(v, base, fake_xray, duration=5, timeout=1, abort_event=ev)
+        assert res.sustained is None
+        assert res.longevity_loss is None
+
+
+def test_execute_post_scan_stability_skips_longevity(monkeypatch):
+    import tempfile
+    from pathlib import Path
+
+    from scanner.engine import execute_configured_post_scan_tests
+    from scanner.models import AppSettings, VlessConfig
+
+    v = VlessConfig(uuid="dummy", host="test.com", port=443)
+    working = [ScanResult(ip="1.1.1.1", port=443, ok=True, latency_ms=40.0, status_code=204)]
+    called = {"longevity": False}
+
+    monkeypatch.setattr(
+        "scanner.engine.run_stability_stage",
+        lambda *a, **kw: [ScanResult(ip="1.1.1.1", port=443, ok=True, latency_ms=42.0, jitter_ms=2.0, status_code=204)],
+    )
+    monkeypatch.setattr(
+        "scanner.engine.run_longevity_stage",
+        lambda *a, **kw: called.__setitem__("longevity", True) or [],
+    )
+    monkeypatch.setattr("scanner.engine.enrich_results_with_colo", lambda *a, **kw: None)
+
+    with tempfile.TemporaryDirectory() as td:
+        settings = AppSettings(post_scan_mode="stability", longevity_test=True)
+        out_res, _, _, prefix = execute_configured_post_scan_tests(settings, v, working, Path(td) / "xray", Path(td))
+        assert called["longevity"] is False
+        assert prefix == "clean_ips_rechecked"
+        assert len(out_res) == 1
+
+
 

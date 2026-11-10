@@ -9,19 +9,29 @@ from __future__ import annotations
 
 import argparse
 import os
-import platform
-import shutil
-import stat
-import subprocess
 import sys
 import tempfile
-import zipfile
 from pathlib import Path
+
+
+def app_root() -> Path:
+    return Path(__file__).resolve().parent.parent
+
+
+if str(app_root()) not in sys.path:
+    sys.path.insert(0, str(app_root()))
+
+from scanner.xray import (  # noqa: E402
+    extract_xray_archive,
+    fetch_latest_xray_tag,
+    get_platform_asset_name,
+    get_xray_version,
+)
 
 try:
     import requests
 except ImportError:
-    requests = None
+    requests = None  # type: ignore[assignment]
 
 try:
     from rich.console import Console
@@ -33,53 +43,11 @@ except ImportError:
     RICH = False
 
 
-def app_root() -> Path:
-    return Path(__file__).resolve().parent.parent
-
-
-def get_platform_asset_name() -> str:
-    system = platform.system().lower()
-    machine = platform.machine().lower()
-
-    if "windows" in system:
-        if "arm" in machine:
-            return "Xray-windows-arm64-v8a.zip"
-        if "32" in machine or machine in ("i386", "i686"):
-            return "Xray-windows-32.zip"
-        return "Xray-windows-64.zip"
-
-    elif "linux" in system:
-        if "aarch64" in machine or "arm64" in machine:
-            return "Xray-linux-arm64-v8a.zip"
-        if "arm" in machine:
-            return "Xray-linux-arm32-v7a.zip"
-        if "32" in machine or machine in ("i386", "i686"):
-            return "Xray-linux-32.zip"
-        return "Xray-linux-64.zip"
-
-    elif "darwin" in system:
-        if "arm64" in machine or "aarch64" in machine:
-            return "Xray-macos-arm64-v8a.zip"
-        return "Xray-macos-64.zip"
-
-    raise RuntimeError(f"Unsupported operating system: {system} ({machine})")
-
-
 def get_latest_tag(proxies: dict | None = None) -> str:
     if requests is None:
         raise RuntimeError("Package 'requests' is required. Run: pip install requests")
-
-    url = "https://github.com/XTLS/Xray-core/releases/latest"
-    r = requests.head(url, allow_redirects=False, timeout=5.0, proxies=proxies, headers={"User-Agent": "CloudScanner"})
-    loc = r.headers.get("Location") or ""
-    if "/tag/" in loc:
-        return loc.rsplit("/tag/", 1)[-1].strip()
-    # Fallback to GitHub API
-    api_url = "https://api.github.com/repos/XTLS/Xray-core/releases/latest"
-    res = requests.get(api_url, timeout=5.0, proxies=proxies, headers={"User-Agent": "CloudScanner"})
-    if res.status_code == 200:
-        return res.json().get("tag_name", "v26.3.27")
-    return "v26.3.27"
+    tag = fetch_latest_xray_tag(timeout=5.0, proxies=proxies, fallback_default="v26.3.27")
+    return tag or "v26.3.27"
 
 
 def download_file(url: str, dest: Path, proxies: dict | None = None) -> None:
@@ -120,39 +88,14 @@ def download_file(url: str, dest: Path, proxies: dict | None = None) -> None:
 
 
 def extract_core(zip_path: Path, target_dir: Path) -> None:
-    target_dir.mkdir(parents=True, exist_ok=True)
-    with zipfile.ZipFile(zip_path, "r") as zf:
-        for member in zf.namelist():
-            filename = os.path.basename(member)
-            # Only extract main binary and data files
-            if not filename:
-                continue
-            low = filename.lower()
-            if low.startswith("xray") or low.endswith(".dat") or low.endswith(".txt"):
-                source = zf.open(member)
-                target_file = target_dir / filename
-                with open(target_file, "wb") as target:
-                    shutil.copyfileobj(source, target)
-
-    # Set executable bit on Linux / macOS
-    for exe_name in ("xray", "xray.exe"):
-        exe_path = target_dir / exe_name
-        if exe_path.exists() and not exe_name.endswith(".exe"):
-            current = os.stat(exe_path).st_mode
-            os.chmod(exe_path, current | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+    extract_xray_archive(zip_path, target_dir)
 
 
 def verify_installation(target_dir: Path) -> bool:
-    exe = "xray.exe" if platform.system().lower().startswith("win") else "xray"
-    exe_path = target_dir / exe
-    if not exe_path.exists():
-        return False
+    import platform
 
-    try:
-        res = subprocess.run([str(exe_path), "version"], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, timeout=3.0)
-        return "Xray" in res.stdout
-    except Exception:
-        return False
+    exe = "xray.exe" if platform.system().lower().startswith("win") else "xray"
+    return bool(get_xray_version(target_dir / exe))
 
 
 def main() -> int:
@@ -181,8 +124,13 @@ def main() -> int:
         return 1
 
     print("Checking latest Xray-core release on GitHub...")
-    tag = args.tag or get_latest_tag(proxies)
-    if not tag.startswith("v") and not tag[0].isdigit():
+    try:
+        tag = args.tag or get_latest_tag(proxies)
+    except Exception as e:
+        print(f"Failed to resolve latest Xray-core release tag: {e}")
+        print("\nTip: If GitHub is slow or blocked in your network, pass a proxy: python scripts/download_core.py -p http://127.0.0.1:10808")
+        return 2
+    if tag and not tag.startswith("v") and not tag[0].isdigit():
         tag = f"v{tag}"
     print(f"Target version: {tag}")
 

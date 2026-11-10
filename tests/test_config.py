@@ -35,6 +35,33 @@ def test_parse_vless_insecure_handling():
     tls_settings3 = cfg3["outbounds"][0]["streamSettings"]["tlsSettings"]
     assert tls_settings3["allowInsecure"] is False
 
+    # allowInsecure=0 alongside insecure=1
+    raw4 = "vless://uuid@host.com:443?security=tls&allowInsecure=0&insecure=1"
+    v4 = parse_vless(raw4)
+    cfg4 = make_xray_config(v4, "1.1.1.1", 1080)
+    tls_settings4 = cfg4["outbounds"][0]["streamSettings"]["tlsSettings"]
+    assert tls_settings4["allowInsecure"] is True
+
+
+def test_parse_vless_requires_at_and_preserves_plus():
+    import pytest
+
+    with pytest.raises(ValueError):
+        parse_vless("vless://example.com:443?security=tls")
+
+    v = parse_vless("vless://my-uuid@example.com:443?security=reality&pbk=abc+def%2520&path=%2Fws#Test")
+    assert v.query["pbk"] == "abc+def%20"
+    assert v.query["path"] == "/ws"
+
+
+def test_make_vless_link_ipv6_brackets():
+    v = parse_vless("vless://uuid@example.com:443?security=tls&type=ws#MyV6")
+    link = make_vless_link(v, "2606:4700:4700::1111", 8443, "Tag")
+    assert "@[2606:4700:4700::1111]:8443?" in link
+    reparsed = parse_vless(link)
+    assert reparsed.host == "2606:4700:4700::1111"
+    assert reparsed.port == 8443
+
 
 def test_make_vless_link_replacement():
     raw = "vless://uuid@old-host.com:443?security=tls&type=ws#OldRemark"
