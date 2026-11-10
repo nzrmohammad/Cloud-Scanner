@@ -368,4 +368,11 @@ def test_run_speed_stage_skips_when_zero_sizes(tmp_path):
     assert out == base
 
 
+def test_build_target_pairs_respects_explicit_ports_and_deduplicates():
+    from scanner.engine import build_target_pairs
+
+    pairs = build_target_pairs(["1.1.1.1:443", "1.1.1.1:443", "1.0.0.1"], [443, 8443])
+    assert pairs == [("1.1.1.1", 443), ("1.0.0.1", 443), ("1.0.0.1", 8443)]
+
+
 

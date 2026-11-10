@@ -446,6 +446,7 @@ def save_scan_summary_report(
     total_targets_count: int = 0,
     tcp_alive_count: int = 0,
     recommendations: Optional[List[SmartRecommendation]] = None,
+    initial_ok_count: Optional[int] = None,
 ) -> Path:
     """Generate and persist a single, comprehensive scan summary report of all testing stages."""
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -483,13 +484,18 @@ def save_scan_summary_report(
         lines.append(f"  Timeout      : {settings.timeout}s")
         lines.append(f"  Post-Scan    : {settings.post_scan_mode.upper()}")
 
+    stage2_line = (
+        f"  * Stage 2: Initial Xray scan working : {initial_ok_count} endpoints (filtered to {len(ok)})"
+        if initial_ok_count is not None and initial_ok_count != len(ok)
+        else f"  * Stage 2: Initial Xray scan working : {len(ok)} endpoints (saved to clean_ips.txt)"
+    )
     lines.extend([
         "",
         "2. STAGE-BY-STAGE FUNNEL STATISTICS",
         sub_sep,
         f"  * Total candidate targets expanded   : {total_targets_count}",
         f"  * Stage 1: Fast TCP Pre-filter alive : {tcp_alive_count} (saved to tcp_alive_with_port.txt)",
-        f"  * Stage 2: Initial Xray scan working : {len(ok)} endpoints (saved to clean_ips.txt)",
+        stage2_line,
     ])
 
     has_recheck = any(r.jitter_ms is not None for r in ok)
@@ -598,6 +604,7 @@ class ResultExporter:
         total_targets_count: int = 0,
         tcp_alive_count: int = 0,
         recommendations: Optional[List[SmartRecommendation]] = None,
+        initial_ok_count: Optional[int] = None,
     ) -> Path:
         return save_scan_summary_report(
             results,
@@ -607,5 +614,6 @@ class ResultExporter:
             total_targets_count=total_targets_count,
             tcp_alive_count=tcp_alive_count,
             recommendations=recommendations,
+            initial_ok_count=initial_ok_count,
         )
 

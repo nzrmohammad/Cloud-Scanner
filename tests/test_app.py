@@ -50,3 +50,41 @@ def test_run_cli_applies_max_latency_without_speed_test(monkeypatch, tmp_path):
     finally:
         close_logging()
         set_geoip_cache_dir(app_dir() / "results")
+
+
+def test_run_cli_explicit_port_target_count_and_all_filtered_summary(monkeypatch, tmp_path):
+    xray_bin = tmp_path / "xray.exe"
+    xray_bin.write_text("dummy", encoding="utf-8")
+    out_dir = tmp_path / "out"
+
+    fake_results = [
+        ScanResult(ip="104.16.1.1", port=443, ok=True, latency_ms=250.0, status_code=204),
+    ]
+    monkeypatch.setattr("scanner.app._run_scan_with_tracking", lambda **kw: (fake_results, 1))
+    monkeypatch.setattr("scanner.app.enrich_results_with_colo", lambda *a, **kw: None)
+    monkeypatch.setattr("scanner.app.show_final_results", lambda *a, **kw: None)
+
+    app = CloudScannerApp(
+        [
+            "-c",
+            "vless://11111111-2222-3333-4444-555555555555@example.com:443?security=tls&type=ws#CLI2",
+            "-t",
+            "104.16.1.1:443",
+            "--all-cf-tls-ports",
+            "--xray",
+            str(xray_bin),
+            "-o",
+            str(out_dir),
+            "--max-latency",
+            "50",
+        ]
+    )
+    try:
+        rc = app.run()
+        assert rc == 0
+        report = (out_dir / "scan_summary_report.txt").read_text(encoding="utf-8")
+        assert "Total candidate targets expanded   : 1" in report
+        assert "1 endpoints (filtered to 0)" in report
+    finally:
+        close_logging()
+        set_geoip_cache_dir(app_dir() / "results")

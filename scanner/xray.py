@@ -673,6 +673,20 @@ def adapt_config_for_xray_version(cfg: Dict[str, Any], version: Optional[str]) -
                     ws_cfg["host"] = host_val
                 if not headers:
                     ws_cfg.pop("headers", None)
+        net_type = str(stream.get("network") or "").lower()
+        http_cfg = stream.get("httpSettings")
+        if net_type in ("http", "h2") and isinstance(http_cfg, dict):
+            hosts = http_cfg.get("host")
+            first_host = clean_dns_host(hosts[0] if isinstance(hosts, list) and hosts else str(hosts or ""))
+            xhttp_cfg: Dict[str, Any] = {
+                "path": http_cfg.get("path") or "/",
+                "mode": "stream-one",
+            }
+            if first_host:
+                xhttp_cfg["host"] = first_host
+            stream["network"] = "xhttp"
+            stream["xhttpSettings"] = xhttp_cfg
+            stream.pop("httpSettings", None)
     return cfg
 
 

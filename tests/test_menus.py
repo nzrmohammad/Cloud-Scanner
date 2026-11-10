@@ -115,3 +115,29 @@ def test_windows_keys_map_home_end_delete(monkeypatch):
             sys.modules.pop("msvcrt", None)
         else:
             sys.modules["msvcrt"] = prev_msvcrt
+
+
+def test_key_menus_interactive_loop_simulated_keys(monkeypatch):
+    from scanner.models import NavigationBack
+    from scanner.ui import menus
+
+    monkeypatch.setattr(menus, "terminal_supports_keys", lambda: True)
+    monkeypatch.setattr(menus, "RICH", False)
+    monkeypatch.setattr(menus, "console", None)
+    monkeypatch.setattr(menus, "clear_screen", lambda: None)
+    monkeypatch.setattr(menus, "render_key_menu", lambda *a, **kw: None)
+
+    rows = [("First", "A"), ("Second", "B"), ("Third", "C")]
+
+    key_seq = iter(["down", "enter"])
+    monkeypatch.setattr(menus, "read_key", lambda: next(key_seq))
+    assert menus.key_select_menu("Single", rows, default_index=0) == 1
+
+    multi_seq = iter(["space", "down", "down", "space", "enter"])
+    monkeypatch.setattr(menus, "read_key", lambda: next(multi_seq))
+    assert menus.key_multi_select_menu("Multi", rows) == [0, 2]
+
+    back_seq = iter(["esc"])
+    monkeypatch.setattr(menus, "read_key", lambda: next(back_seq))
+    with pytest.raises(NavigationBack):
+        menus.key_select_menu("Back", rows, allow_back=True)

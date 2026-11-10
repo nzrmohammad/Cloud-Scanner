@@ -18,6 +18,7 @@ from scanner.constants import (
     app_dir,
 )
 from scanner.engine import (
+    build_target_pairs,
     enrich_results_with_colo,
     run_longevity_stage,
     run_scan,
@@ -255,7 +256,7 @@ class CloudScannerApp:
                 set_geoip_cache_dir(output_dir)
 
                 while True:
-                    total_endpoints = len(targets) * len(ports)
+                    total_endpoints = len(build_target_pairs(targets, ports))
                     est_time = max(3, int(total_endpoints / max(1, settings.workers * 2)))
 
                     render_stage(
@@ -417,7 +418,7 @@ class CloudScannerApp:
             cprint(str(e), "red")
             return 2
 
-        total_prefilter = len(targets) * len(ports)
+        total_prefilter = len(build_target_pairs(targets, ports))
         try:
             results, tcp_alive_count = _run_scan_with_tracking(
                 v=v,
@@ -562,6 +563,7 @@ class CloudScannerApp:
                 total_targets_count=total_prefilter,
                 tcp_alive_count=tcp_alive_count,
                 recommendations=recs,
+                initial_ok_count=len(final_results),
             )
         return 0
 

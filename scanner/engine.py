@@ -1009,6 +1009,24 @@ def run_latency_scan(
     return results
 
 
+def build_target_pairs(targets: List[str], ports: List[int]) -> List[Tuple[str, int]]:
+    """Expand targets + fallback ports into unique (host, port) endpoint tuples."""
+    target_pairs: List[Tuple[str, int]] = []
+    seen_pairs = set()
+    for t in targets:
+        host, explicit_port = parse_ip_and_port(t)
+        if explicit_port is not None:
+            if (host, explicit_port) not in seen_pairs:
+                seen_pairs.add((host, explicit_port))
+                target_pairs.append((host, explicit_port))
+        else:
+            for p in ports:
+                if (host, p) not in seen_pairs:
+                    seen_pairs.add((host, p))
+                    target_pairs.append((host, p))
+    return target_pairs
+
+
 def run_scan(
     v: VlessConfig,
     targets: List[str],
@@ -1028,19 +1046,7 @@ def run_scan(
     make_tcp_reporter: Optional[Callable[[int], Any]] = None,
 ) -> List[ScanResult]:
     """Execute complete initial scan across targets and ports in a headless, decoupled pipeline."""
-    target_pairs: List[Tuple[str, int]] = []
-    seen_pairs = set()
-    for t in targets:
-        host, explicit_port = parse_ip_and_port(t)
-        if explicit_port is not None:
-            if (host, explicit_port) not in seen_pairs:
-                seen_pairs.add((host, explicit_port))
-                target_pairs.append((host, explicit_port))
-        else:
-            for p in ports:
-                if (host, p) not in seen_pairs:
-                    seen_pairs.add((host, p))
-                    target_pairs.append((host, p))
+    target_pairs = build_target_pairs(targets, ports)
     if not target_pairs:
         return []
 

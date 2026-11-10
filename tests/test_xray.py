@@ -193,3 +193,18 @@ def test_xray_transient_bind_error_retries_with_fresh_port(monkeypatch, tmp_path
     with XrayProcess(tmp_path / "xray", v, "1.1.1.1", 443, ready_timeout=2.0) as xp:
         assert xp.socks_port == 51002
     assert attempts["count"] == 2
+
+
+def test_adapt_config_migrates_h2_to_xhttp_for_modern_xray():
+    from scanner.xray import adapt_config_for_xray_version
+
+    v_h2 = parse_vless("vless://uuid@example.com:443?security=tls&type=h2&sni=Ex.Com.&host=Ex.Com.&path=%2Fh2#H2")
+    legacy_cfg = adapt_config_for_xray_version(make_xray_config(v_h2, "1.1.1.1", 10808), "26.3.27")
+    assert legacy_cfg["outbounds"][0]["streamSettings"]["network"] == "h2"
+    assert "httpSettings" in legacy_cfg["outbounds"][0]["streamSettings"]
+
+    modern_cfg = adapt_config_for_xray_version(make_xray_config(v_h2, "1.1.1.1", 10808), "26.11.9")
+    stream = modern_cfg["outbounds"][0]["streamSettings"]
+    assert stream["network"] == "xhttp"
+    assert "httpSettings" not in stream
+    assert stream["xhttpSettings"] == {"path": "/h2", "host": "Ex.Com", "mode": "stream-one"}
