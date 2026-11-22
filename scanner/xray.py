@@ -46,7 +46,10 @@ def _get_win32_job_handle() -> Any:
         try:
             import ctypes
 
-            kernel32 = ctypes.windll.kernel32
+            windll = getattr(ctypes, "windll", None)
+            if not windll:
+                return None
+            kernel32 = windll.kernel32
             kernel32.CreateJobObjectW.restype = ctypes.c_void_p
             kernel32.CreateJobObjectW.argtypes = [ctypes.c_void_p, ctypes.c_wchar_p]
             kernel32.SetInformationJobObject.restype = ctypes.c_bool
@@ -124,7 +127,10 @@ def _assign_process_to_job(proc: subprocess.Popen) -> None:
     try:
         import ctypes
 
-        kernel32 = ctypes.windll.kernel32
+        windll = getattr(ctypes, "windll", None)
+        if not windll:
+            return
+        kernel32 = windll.kernel32
         handle = getattr(proc, "_handle", None)
         if handle:
             kernel32.AssignProcessToJobObject(job, ctypes.c_void_p(int(handle)))
