@@ -1,0 +1,2 @@
+# Irancell IPv6 Range
+2a10:1fc0::/29
