@@ -67,3 +67,31 @@ def test_expand_targets_range_with_port():
     assert res1 == ["192.168.1.10:8443", "192.168.1.11:8443", "192.168.1.12:8443"]
     res2 = expand_targets(["192.168.1.20-192.168.1.21:2053"], max_hosts=10)
     assert res2 == ["192.168.1.20:2053", "192.168.1.21:2053"]
+
+
+def test_resolve_target_file_rejects_unc():
+    from scanner.targets import _resolve_target_file
+
+    assert _resolve_target_file(r"\\malicious\share\ips.txt", "ips") is None
+    assert _resolve_target_file("//malicious/share/ips.txt", "ips") is None
+
+
+def test_small_ipv6_not_formatted_as_ipv4():
+    res = expand_targets(["::1", "::2", "::ffff"])
+    assert res == ["::1", "::2", "::ffff"]
+
+
+def test_sampling_budget_one_prefers_ipv4():
+    # When max_hosts=1 and equal weight between v4 and v6, deterministic largest remainder preserves IPv4
+    res_v4_v6 = expand_targets(["1.1.1.1", "2606:4700:4700::1111"], max_hosts=1, sample_if_too_many=True)
+    res_v6_v4 = expand_targets(["2606:4700:4700::1111", "1.1.1.1"], max_hosts=1, sample_if_too_many=True)
+    assert res_v4_v6 == ["1.1.1.1"]
+    assert res_v6_v4 == ["1.1.1.1"]
+
+
+def test_overlapping_port_and_wildcard_targets_merged():
+    # 1.2.3.4 (wildcard) subsumes 1.2.3.4:443; with max_hosts=2, 1.2.3.5 is not crowded out
+    sampled = expand_targets(["1.2.3.4", "1.2.3.4:443", "1.2.3.5"], max_hosts=2, sample_if_too_many=True)
+    assert len(sampled) == 2
+    assert "1.2.3.4" in sampled
+    assert "1.2.3.5" in sampled

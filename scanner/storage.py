@@ -6,7 +6,6 @@ from typing import List, Optional, Tuple
 from scanner.analytics import (
     apply_result_filters,
     detect_stage_flags,
-    full_sort_key,
     output_sort_key,
 )
 from scanner.config import make_vless_link
@@ -36,6 +35,38 @@ def _fmt_summary_ad(r: ScanResult) -> str:
     return "-"
 
 
+def _clean_error_message(err: str) -> str:
+    """Simplify raw exception reprs into human-readable error descriptions."""
+    cleaned = (err or "").strip()
+    if not cleaned:
+        return ""
+
+    # Unpack tuple reprs: ("msg", code) or ('msg', RemoteDisconnected(...))
+    if cleaned.startswith("(") and cleaned.endswith(")"):
+        try:
+            import ast
+
+            parsed = ast.literal_eval(cleaned)
+            if isinstance(parsed, tuple) and parsed:
+                cleaned = str(parsed[0])
+        except Exception:
+            inner = cleaned[1:-1].strip()
+            if inner.startswith(("'", '"')):
+                quote_char = inner[0]
+                end_idx = inner.find(quote_char, 1)
+                if end_idx != -1:
+                    cleaned = inner[1:end_idx]
+
+    for prefix in ("HTTPSConnectionPool(host=", "HTTPConnectionPool(host="):
+        if prefix in cleaned:
+            if "): " in cleaned:
+                cleaned = cleaned.split("): ", 1)[-1]
+            else:
+                cleaned = cleaned.replace(prefix, "").rstrip(")")
+
+    return cleaned[:100].strip()
+
+
 def _format_txt_line(
     r: ScanResult,
     *,
@@ -53,7 +84,7 @@ def _format_txt_line(
     down = f"{r.speed_mbps:.2f} Mbps" if r.speed_mbps is not None else "-"
     up = f"{r.upload_mbps:.2f} Mbps" if r.upload_mbps is not None else "-"
     jitter = f"{r.jitter_ms:.1f} ms" if r.jitter_ms is not None else "-"
-    loss = f"{r.packet_loss:.0f}%"
+    loss = f"{r.packet_loss:.0f}%" if r.packet_loss is not None else "-"
     http_str = str(r.status_code) if r.status_code is not None else "-"
     anti_drop = f" | anti_drop: {_fmt_longevity_status(r)}" if r.sustained is not None else ""
     loc_str = f" | loc: {format_ip_location(r.ip_country, r.ip_city)}" if (include_loc and r.ip_country) else ""
@@ -61,9 +92,9 @@ def _format_txt_line(
 
     extra_errs = []
     if include_speed_errors and r.speed_error:
-        extra_errs.append(f"down_err: {r.speed_error}")
+        extra_errs.append(f"down_err: {_clean_error_message(r.speed_error)}")
     if include_speed_errors and r.upload_error:
-        extra_errs.append(f"up_err: {r.upload_error}")
+        extra_errs.append(f"up_err: {_clean_error_message(r.upload_error)}")
     extra = (" | " + ", ".join(extra_errs)) if extra_errs else ""
 
     if is_full:
@@ -72,17 +103,19 @@ def _format_txt_line(
             f"loss: {loss} | pass: {r.recheck_passed}/{r.recheck_total}{anti_drop}{loc_str}{colo_str} | HTTP {http_str}{extra}"
         )
     if is_speed:
+        recheck_str = f" | latency: {latency} | jitter: {jitter} | loss: {loss}" if r.jitter_ms is not None else ""
         return (
-            f"{addr} | down: {down} | up: {up} | downloaded: {r.download_bytes} bytes | "
+            f"{addr} | down: {down} | up: {up}{recheck_str} | downloaded: {r.download_bytes} bytes | "
             f"uploaded: {r.upload_bytes} bytes{loc_str}{colo_str}{extra}"
         )
     if is_longevity:
+        recheck_str = f" | jitter: {jitter} | loss: {loss}" if r.jitter_ms is not None else ""
         return (
-            f"{addr} | anti_drop: {_fmt_longevity_status(r)} | latency: {latency}{loc_str}{colo_str} | HTTP {http_str}"
+            f"{addr} | anti_drop: {_fmt_longevity_status(r)} | latency: {latency}{recheck_str}{loc_str}{colo_str} | HTTP {http_str}"
         )
     if is_recheck:
         return (
-            f"{addr} | latency_avg: {latency} | jitter: {jitter} | loss: {loss} | "
+            f"{addr} | latency: {latency} | jitter: {jitter} | loss: {loss} | "
             f"pass: {r.recheck_passed}/{r.recheck_total}{anti_drop}{loc_str}{colo_str} | HTTP {http_str}"
         )
     return f"{addr} | latency: {latency}{loc_str}{colo_str} | HTTP {http_str}"
@@ -120,7 +153,7 @@ def save_results(
     ok = apply_result_filters(results, max_latency_ms=max_latency_ms, min_speed_mbps=min_speed_mbps)
     is_full, is_speed, is_recheck, is_longevity = detect_stage_flags(filename_prefix, ok)
 
-    sort_fn = full_sort_key if is_full else output_sort_key(filename_prefix)
+    sort_fn = output_sort_key(filename_prefix, ok)
     ok = sorted(ok, key=sort_fn)
     txt_path = output_dir / f"{filename_prefix}.txt"
     csv_path = output_dir / f"{filename_prefix}.csv"
@@ -178,7 +211,7 @@ def save_results(
                 "download_mbps",
                 "upload_mbps",
                 "ttfb_ms",
-                "avg_latency_ms",
+                "latency_ms",
                 "jitter_ms",
                 "packet_loss_pct",
                 "anti_drop_sustained",
@@ -205,88 +238,172 @@ def save_results(
                     f"{r.ttfb_ms:.1f}" if r.ttfb_ms is not None else "",
                     f"{r.latency_ms:.1f}" if r.latency_ms is not None else "",
                     f"{r.jitter_ms:.1f}" if r.jitter_ms is not None else "",
-                    f"{r.packet_loss:.0f}",
+                    f"{r.packet_loss:.0f}" if r.packet_loss is not None else "",
                     str(r.sustained) if r.sustained is not None else "",
                     f"{r.longevity_loss:.0f}" if r.longevity_loss is not None else "",
                     r.colo or "",
                     format_cf_colo(r.colo) if r.colo else "",
-                    r.download_bytes or "",
-                    r.upload_bytes or "",
-                    r.recheck_passed or "",
-                    r.recheck_total or "",
+                    r.download_bytes if r.speed_mbps is not None else "",
+                    r.upload_bytes if r.upload_mbps is not None else "",
+                    r.recheck_passed if r.recheck_total > 0 else "",
+                    r.recheck_total if r.recheck_total > 0 else "",
                     r.status_code or "",
                     now,
                 ])
         elif is_longevity:
-            w.writerow([
-                "ip",
-                "port",
-                "ip_country",
-                "ip_city",
-                "ip_org",
-                "ip_location",
-                "anti_drop_sustained",
-                "anti_drop_loss_pct",
-                "avg_latency_ms",
-                "colo_code",
-                "colo_location",
-                "status_code",
-                "tested_at",
-            ])
-            for r in ok:
+            has_recheck_data = any(r.jitter_ms is not None for r in ok)
+            if has_recheck_data:
                 w.writerow([
-                    r.ip,
-                    r.port,
-                    r.ip_country or "",
-                    r.ip_city or "",
-                    r.ip_org or "",
-                    format_ip_location(r.ip_country, r.ip_city) if r.ip_country else "",
-                    str(r.sustained) if r.sustained is not None else "",
-                    f"{r.longevity_loss:.0f}" if r.longevity_loss is not None else "",
-                    f"{r.latency_ms:.1f}" if r.latency_ms is not None else "",
-                    r.colo or "",
-                    format_cf_colo(r.colo) if r.colo else "",
-                    r.status_code or "",
-                    now,
+                    "ip",
+                    "port",
+                    "ip_country",
+                    "ip_city",
+                    "ip_org",
+                    "ip_location",
+                    "anti_drop_sustained",
+                    "anti_drop_loss_pct",
+                    "latency_ms",
+                    "jitter_ms",
+                    "packet_loss_pct",
+                    "colo_code",
+                    "colo_location",
+                    "status_code",
+                    "tested_at",
                 ])
+                for r in ok:
+                    w.writerow([
+                        r.ip,
+                        r.port,
+                        r.ip_country or "",
+                        r.ip_city or "",
+                        r.ip_org or "",
+                        format_ip_location(r.ip_country, r.ip_city) if r.ip_country else "",
+                        str(r.sustained) if r.sustained is not None else "",
+                        f"{r.longevity_loss:.0f}" if r.longevity_loss is not None else "",
+                        f"{r.latency_ms:.1f}" if r.latency_ms is not None else "",
+                        f"{r.jitter_ms:.1f}" if r.jitter_ms is not None else "",
+                        f"{r.packet_loss:.0f}" if r.packet_loss is not None else "",
+                        r.colo or "",
+                        format_cf_colo(r.colo) if r.colo else "",
+                        r.status_code or "",
+                        now,
+                    ])
+            else:
+                w.writerow([
+                    "ip",
+                    "port",
+                    "ip_country",
+                    "ip_city",
+                    "ip_org",
+                    "ip_location",
+                    "anti_drop_sustained",
+                    "anti_drop_loss_pct",
+                    "latency_ms",
+                    "colo_code",
+                    "colo_location",
+                    "status_code",
+                    "tested_at",
+                ])
+                for r in ok:
+                    w.writerow([
+                        r.ip,
+                        r.port,
+                        r.ip_country or "",
+                        r.ip_city or "",
+                        r.ip_org or "",
+                        format_ip_location(r.ip_country, r.ip_city) if r.ip_country else "",
+                        str(r.sustained) if r.sustained is not None else "",
+                        f"{r.longevity_loss:.0f}" if r.longevity_loss is not None else "",
+                        f"{r.latency_ms:.1f}" if r.latency_ms is not None else "",
+                        r.colo or "",
+                        format_cf_colo(r.colo) if r.colo else "",
+                        r.status_code or "",
+                        now,
+                    ])
         elif is_speed:
-            w.writerow([
-                "ip",
-                "port",
-                "ip_country",
-                "ip_city",
-                "ip_org",
-                "ip_location",
-                "download_mbps",
-                "upload_mbps",
-                "ttfb_ms",
-                "colo_code",
-                "colo_location",
-                "speed_bytes",
-                "upload_bytes",
-                "speed_error",
-                "upload_error",
-                "tested_at",
-            ])
-            for r in ok:
+            has_recheck_data = any(r.jitter_ms is not None for r in ok)
+            if has_recheck_data:
                 w.writerow([
-                    r.ip,
-                    r.port,
-                    r.ip_country or "",
-                    r.ip_city or "",
-                    r.ip_org or "",
-                    format_ip_location(r.ip_country, r.ip_city) if r.ip_country else "",
-                    f"{r.speed_mbps:.2f}" if r.speed_mbps is not None else "",
-                    f"{r.upload_mbps:.2f}" if r.upload_mbps is not None else "",
-                    f"{r.ttfb_ms:.1f}" if r.ttfb_ms is not None else "",
-                    r.colo or "",
-                    format_cf_colo(r.colo) if r.colo else "",
-                    r.download_bytes or "",
-                    r.upload_bytes or "",
-                    r.speed_error or "",
-                    r.upload_error or "",
-                    now,
+                    "ip",
+                    "port",
+                    "ip_country",
+                    "ip_city",
+                    "ip_org",
+                    "ip_location",
+                    "download_mbps",
+                    "upload_mbps",
+                    "ttfb_ms",
+                    "latency_ms",
+                    "jitter_ms",
+                    "packet_loss_pct",
+                    "colo_code",
+                    "colo_location",
+                    "speed_bytes",
+                    "upload_bytes",
+                    "speed_error",
+                    "upload_error",
+                    "tested_at",
                 ])
+                for r in ok:
+                    w.writerow([
+                        r.ip,
+                        r.port,
+                        r.ip_country or "",
+                        r.ip_city or "",
+                        r.ip_org or "",
+                        format_ip_location(r.ip_country, r.ip_city) if r.ip_country else "",
+                        f"{r.speed_mbps:.2f}" if r.speed_mbps is not None else "",
+                        f"{r.upload_mbps:.2f}" if r.upload_mbps is not None else "",
+                        f"{r.ttfb_ms:.1f}" if r.ttfb_ms is not None else "",
+                        f"{r.latency_ms:.1f}" if r.latency_ms is not None else "",
+                        f"{r.jitter_ms:.1f}" if r.jitter_ms is not None else "",
+                        f"{r.packet_loss:.0f}" if r.packet_loss is not None else "",
+                        r.colo or "",
+                        format_cf_colo(r.colo) if r.colo else "",
+                        r.download_bytes or "",
+                        r.upload_bytes or "",
+                        _clean_error_message(r.speed_error),
+                        _clean_error_message(r.upload_error),
+                        now,
+                    ])
+            else:
+                w.writerow([
+                    "ip",
+                    "port",
+                    "ip_country",
+                    "ip_city",
+                    "ip_org",
+                    "ip_location",
+                    "download_mbps",
+                    "upload_mbps",
+                    "ttfb_ms",
+                    "colo_code",
+                    "colo_location",
+                    "speed_bytes",
+                    "upload_bytes",
+                    "speed_error",
+                    "upload_error",
+                    "tested_at",
+                ])
+                for r in ok:
+                    w.writerow([
+                        r.ip,
+                        r.port,
+                        r.ip_country or "",
+                        r.ip_city or "",
+                        r.ip_org or "",
+                        format_ip_location(r.ip_country, r.ip_city) if r.ip_country else "",
+                        f"{r.speed_mbps:.2f}" if r.speed_mbps is not None else "",
+                        f"{r.upload_mbps:.2f}" if r.upload_mbps is not None else "",
+                        f"{r.ttfb_ms:.1f}" if r.ttfb_ms is not None else "",
+                        r.colo or "",
+                        format_cf_colo(r.colo) if r.colo else "",
+                        r.download_bytes or "",
+                        r.upload_bytes or "",
+                        _clean_error_message(r.speed_error),
+                        _clean_error_message(r.upload_error),
+                        now,
+                    ])
         elif is_recheck:
             w.writerow([
                 "ip",
@@ -295,7 +412,7 @@ def save_results(
                 "ip_city",
                 "ip_org",
                 "ip_location",
-                "avg_latency_ms",
+                "latency_ms",
                 "jitter_ms",
                 "packet_loss_pct",
                 "anti_drop_sustained",
@@ -317,13 +434,13 @@ def save_results(
                     format_ip_location(r.ip_country, r.ip_city) if r.ip_country else "",
                     f"{r.latency_ms:.1f}" if r.latency_ms is not None else "",
                     f"{r.jitter_ms:.1f}" if r.jitter_ms is not None else "",
-                    f"{r.packet_loss:.0f}",
+                    f"{r.packet_loss:.0f}" if r.packet_loss is not None else "",
                     str(r.sustained) if r.sustained is not None else "",
                     f"{r.longevity_loss:.0f}" if r.longevity_loss is not None else "",
                     r.colo or "",
                     format_cf_colo(r.colo) if r.colo else "",
-                    r.recheck_passed or "",
-                    r.recheck_total or "",
+                    r.recheck_passed if r.recheck_total > 0 else "",
+                    r.recheck_total if r.recheck_total > 0 else "",
                     r.status_code or "",
                     now,
                 ])
@@ -357,8 +474,8 @@ def save_results(
                 ])
 
     # Save ready-to-import VLESS links
+    vless_path = output_dir / f"{filename_prefix}_vless.txt"
     if vless_config and ok:
-        vless_path = output_dir / f"{filename_prefix}_vless.txt"
         vless_lines = [
             make_vless_link(
                 vless_config,
@@ -369,12 +486,22 @@ def save_results(
             for r in ok
         ]
         vless_path.write_text("\n".join(vless_lines) + "\n", encoding="utf-8")
+    elif not ok and vless_path.exists():
+        vless_path.write_text("# No working endpoints found for this scan\n", encoding="utf-8")
 
     # Save per-port separated output files
     ports_found = sorted(set(r.port for r in ok))
+    by_port_dir = output_dir / "by_port"
     if len(ports_found) > 1:
-        by_port_dir = output_dir / "by_port"
         by_port_dir.mkdir(parents=True, exist_ok=True)
+        # Clean only this prefix's per-port files, not other stage prefixes (e.g. clean_ips vs clean_ips_full_tested)
+        for stale in list(by_port_dir.glob(f"{filename_prefix}_port_*.txt")) + list(
+            by_port_dir.glob(f"{filename_prefix}_vless_port_*.txt")
+        ):
+            try:
+                stale.unlink()
+            except OSError as exc:
+                logger.debug("Failed unlinking stale by_port file %s: %s", stale, exc)
         for p in ports_found:
             port_results = [r for r in ok if r.port == p]
             port_txt = by_port_dir / f"{filename_prefix}_port_{p}.txt"
@@ -405,6 +532,15 @@ def save_results(
                     for r in port_results
                 ]
                 port_vless.write_text("\n".join(port_vless_lines) + "\n", encoding="utf-8")
+    elif by_port_dir.exists():
+        # Single-port or 0 working endpoints: clean stale per-port files for this specific prefix
+        for stale in list(by_port_dir.glob(f"{filename_prefix}_port_*.txt")) + list(
+            by_port_dir.glob(f"{filename_prefix}_vless_port_*.txt")
+        ):
+            try:
+                stale.unlink()
+            except OSError as exc:
+                logger.debug("Failed unlinking stale by_port file %s: %s", stale, exc)
 
     return txt_path, csv_path
 
@@ -414,13 +550,19 @@ def save_recommended_configs(
     output_dir: Path,
 ) -> Optional[Path]:
     """Save smart recommendations to recommended_configs.txt."""
-    if not recs:
-        return None
     try:
         output_dir.mkdir(parents=True, exist_ok=True)
         rec_path = output_dir / "recommended_configs.txt"
+        now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        if not recs:
+            rec_path.write_text(
+                f"=== Cloudflare Clean-IP Smart Recommendations - {now_str} ===\n"
+                "No recommended endpoints available for this scan run.\n",
+                encoding="utf-8",
+            )
+            return rec_path
         lines = [
-            f"=== Cloudflare Clean-IP Smart Recommendations - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} ===",
+            f"=== Cloudflare Clean-IP Smart Recommendations - {now_str} ===",
             "Recommended endpoints ranked by stability, jitter, and download speed:\n",
         ]
         for rec in recs:
@@ -436,7 +578,12 @@ def save_recommended_configs(
         rec_path.write_text("\n".join(lines), encoding="utf-8")
         return rec_path
     except Exception as exc:
-        logger.error("Failed to save recommendations to %s: %s", rec_path if 'rec_path' in locals() else output_dir, exc, exc_info=True)
+        logger.error(
+            "Failed to save recommendations to %s: %s",
+            rec_path if "rec_path" in locals() else output_dir,
+            exc,
+            exc_info=True,
+        )
         return None
 
 
@@ -473,7 +620,8 @@ def save_scan_summary_report(
     if vless_config:
         lines.append(f"  VLESS Remark : {vless_config.remark or '(None)'}")
         lines.append(f"  Target Server: {vless_config.host}:{vless_config.port}")
-        lines.append(f"  UUID / User  : {vless_config.uuid}")
+        masked_uuid = (vless_config.uuid[:8] + "...") if len(vless_config.uuid) > 8 else "***"
+        lines.append(f"  UUID / User  : {masked_uuid}")
         proto = vless_config.query.get("type") or vless_config.query.get("network") or "tcp"
         sec = vless_config.query.get("security") or "tls"
         sni = vless_config.query.get("sni") or vless_config.host
@@ -513,15 +661,16 @@ def save_scan_summary_report(
     if has_speed:
         speed_tested = [r for r in ok if r.speed_mbps is not None]
         top_dl = max((r.speed_mbps for r in speed_tested if r.speed_mbps is not None), default=0.0)
-        top_ul = max((r.upload_mbps for r in speed_tested if r.upload_mbps is not None), default=0.0)
-        lines.append(f"  * Stage 5: Speed Benchmarks          : {len(speed_tested)} tested (Top DL: {top_dl:.2f} Mbps | Top UL: {top_ul:.2f} Mbps)")
+        has_any_ul = any(r.upload_mbps is not None for r in speed_tested)
+        ul_str = f" | Top UL: {max((r.upload_mbps for r in speed_tested if r.upload_mbps is not None), default=0.0):.2f} Mbps" if has_any_ul else ""
+        lines.append(f"  * Stage 5: Speed Benchmarks          : {len(speed_tested)} tested (Top DL: {top_dl:.2f} Mbps{ul_str})")
 
+    lines.extend([
+        "",
+        "3. SMART RECOMMENDATIONS",
+        sub_sep,
+    ])
     if recommendations:
-        lines.extend([
-            "",
-            "3. SMART RECOMMENDATIONS",
-            sub_sep,
-        ])
         for rec in recommendations:
             colo_str = f" ({format_cf_colo(rec.result.colo)})" if rec.result.colo else ""
             lines.append(f"  [{rec.category.upper()}] - {rec.icon}")
@@ -530,6 +679,9 @@ def save_scan_summary_report(
             if rec.vless_link:
                 lines.append(f"    Link     : {rec.vless_link}")
             lines.append("")
+    else:
+        lines.append("  (No smart recommendations available for this scan run)")
+        lines.append("")
 
     ep_w = max(26, max((len(r.endpoint) for r in ok), default=0) + 2)
     lines.extend([

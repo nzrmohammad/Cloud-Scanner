@@ -3,7 +3,7 @@ from pathlib import Path
 from typing import Optional
 
 APP_NAME = "Cloud Scanner"
-APP_VERSION = "v0.3.0"
+APP_VERSION = "v0.4.0"
 APP_CHANNEL = "@Nzrmohammad"
 APP_URL = "https://t.me/Nzrmohammad"
 APP_HEADER = f"{APP_NAME} {APP_VERSION} | {APP_CHANNEL}"
@@ -30,6 +30,14 @@ DEFAULT_UPLOAD_BYTES = mb_to_bytes(1)
 DEFAULT_LONGEVITY_DURATION = 30
 SAFE_AUTO_EXPAND_LIMIT = 50_000
 SAFE_IPV6_AUTO_EXPAND_LIMIT = 2_000
+
+# Video streaming & stability benchmark criteria
+STREAMING_MIN_SPEED_MBPS = 12.0  # Min speed for high quality 1080p60/4K stream
+STREAMING_MID_SPEED_MBPS = 4.0   # Min speed for standard 720p/1080p stream
+STREAMING_LOW_LOSS_PCT = 3.0     # Max packet loss for Tier-0 streaming
+STREAMING_MID_LOSS_PCT = 8.0     # Max packet loss for Tier-1 streaming
+STREAMING_LOW_JITTER_MS = 15.0   # Max jitter for stable video buffer
+STREAMING_MID_JITTER_MS = 30.0   # Max jitter for acceptable video buffer
 
 
 def clean_dns_host(value: Optional[str]) -> str:

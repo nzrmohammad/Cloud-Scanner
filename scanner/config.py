@@ -1,5 +1,5 @@
 from pathlib import Path
-from typing import Dict, Union
+from typing import Dict, Optional, Union
 from urllib.parse import quote, unquote, urlencode, urlparse
 
 from scanner.constants import (
@@ -34,6 +34,8 @@ def _parse_query_params(raw_query: str) -> Dict[str, str]:
 def parse_vless(uri_or_file: str) -> VlessConfig:
     """Parse a VLESS URI or path to a file containing a VLESS URI."""
     value = uri_or_file.strip().strip('"').strip("'")
+    if value.startswith(("\\\\", "//")):
+        raise ValueError("UNC network paths are not permitted for VLESS configuration.")
     possible = Path(value)
     if not value.startswith("vless://") and possible.exists():
         value = possible.read_text(encoding="utf-8").strip()
@@ -61,17 +63,21 @@ def make_vless_link(v: VlessConfig, server_ip: str, port: int, remark_extra: str
     base_remark = v.remark or "CleanIP"
     endpoint = format_host_port(server_ip, port)
     full_remark = f"{base_remark}-{endpoint}-{remark_extra}" if remark_extra else f"{base_remark}-{endpoint}"
-    return f"vless://{v.uuid}@{endpoint}?{q_str}#{quote(full_remark)}"
+    safe_uuid = quote(v.uuid, safe="-._~")
+    return f"vless://{safe_uuid}@{endpoint}?{q_str}#{quote(full_remark)}"
 
 
-def _parse_bounded_int(key: str, val: str, min_val: int) -> int | None:
+def _parse_bounded_int(key: str, val: str, min_val: int, max_val: Optional[int] = None) -> int | None:
     """Parse an integer config setting safely, logging a warning if malformed."""
     try:
         parsed = int(float(val)) if "." in val else int(val)
-    except ValueError:
+    except (ValueError, OverflowError):
         logger.warning("Ignoring non-numeric setting %s = %r in config.txt", key, val)
         return None
-    return max(min_val, parsed)
+    res = max(min_val, parsed)
+    if max_val is not None:
+        res = min(max_val, res)
+    return res
 
 
 class ConfigManager:
@@ -129,11 +135,11 @@ class ConfigManager:
                             if parsed_ports:
                                 settings.ports = parsed_ports
                     elif key in ("workers", "concurrency"):
-                        parsed_int = _parse_bounded_int(key, val, 1)
+                        parsed_int = _parse_bounded_int(key, val, 1, 100)
                         if parsed_int is not None:
                             settings.workers = parsed_int
                     elif key == "timeout":
-                        parsed_int = _parse_bounded_int(key, val, 1)
+                        parsed_int = _parse_bounded_int(key, val, 1, 120)
                         if parsed_int is not None:
                             settings.timeout = parsed_int
                     elif key in ("tcp_prefilter", "prefilter"):
@@ -145,12 +151,15 @@ class ConfigManager:
                         if val.lower() in ("0", "unlimited", "none", "all", "inf", "infinity"):
                             settings.max_targets = 0
                         else:
-                            parsed_int = _parse_bounded_int(key, val, 0)
+                            parsed_int = _parse_bounded_int(key, val, 0, 1_000_000)
                             if parsed_int is not None:
                                 settings.max_targets = parsed_int
                     elif key == "output_dir":
                         if val:
-                            settings.output_dir = Path(val)
+                            if val.startswith(("\\\\", "//")):
+                                logger.warning("Ignoring unsafe UNC output_dir %r in config.txt", val)
+                            else:
+                                settings.output_dir = Path(val)
                     elif key in ("post_scan_mode", "mode"):
                         mode_val = val.lower()
                         if mode_val in ("full", "stability", "longevity", "speed", "none"):
@@ -159,33 +168,33 @@ class ConfigManager:
                         if val.lower() in ("0", "unlimited", "none", "all", "inf", "infinity"):
                             settings.top_targets = 0
                         else:
-                            parsed_int = _parse_bounded_int(key, val, 0)
+                            parsed_int = _parse_bounded_int(key, val, 0, 500)
                             if parsed_int is not None:
                                 settings.top_targets = parsed_int
                     elif key in ("ping_samples", "samples"):
-                        parsed_int = _parse_bounded_int(key, val, 2)
+                        parsed_int = _parse_bounded_int(key, val, 2, 50)
                         if parsed_int is not None:
                             settings.ping_samples = parsed_int
                     elif key in ("longevity_test", "anti_drop", "anti_drop_test"):
                         settings.longevity_test = val.lower() in ("true", "1", "yes", "on")
                     elif key in ("longevity_duration", "anti_drop_duration"):
-                        parsed_int = _parse_bounded_int(key, val, 5)
+                        parsed_int = _parse_bounded_int(key, val, 5, 600)
                         if parsed_int is not None:
                             settings.longevity_duration = parsed_int
                     elif key in ("download_mb", "speed_mb"):
-                        parsed_int = _parse_bounded_int(key, val, 0)
+                        parsed_int = _parse_bounded_int(key, val, 0, 500)
                         if parsed_int is not None:
                             settings.download_mb = parsed_int
                     elif key in ("upload_mb", "speed_upload_mb"):
-                        parsed_int = _parse_bounded_int(key, val, 0)
+                        parsed_int = _parse_bounded_int(key, val, 0, 500)
                         if parsed_int is not None:
                             settings.upload_mb = parsed_int
                     elif key in ("speed_duration", "duration"):
-                        parsed_int = _parse_bounded_int(key, val, 1)
+                        parsed_int = _parse_bounded_int(key, val, 1, 300)
                         if parsed_int is not None:
                             settings.speed_duration = parsed_int
                     elif key == "speed_workers":
-                        parsed_int = _parse_bounded_int(key, val, 1)
+                        parsed_int = _parse_bounded_int(key, val, 1, 50)
                         if parsed_int is not None:
                             settings.speed_workers = parsed_int
                 elif line.startswith("vless://") and not settings.vless_raw:

@@ -6,6 +6,7 @@ the terminal user interface pristine and uncluttered.
 from __future__ import annotations
 
 import logging
+import sys
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Optional
@@ -24,7 +25,7 @@ def close_logging() -> None:
         root_logger.removeHandler(existing)
         try:
             existing.close()
-        except Exception:
+        except (OSError, ValueError):
             pass
     _INITIALIZED = False
     _CONFIGURED_OUTPUT_DIR = None
@@ -65,9 +66,9 @@ def setup_logging(output_dir: Optional[Path] = None, log_level: int = logging.DE
         root_logger.addHandler(handler)
         _INITIALIZED = True
         _CONFIGURED_OUTPUT_DIR = target_dir
-    except Exception:
+    except (OSError, PermissionError) as exc:
         # Fall back gracefully if disk writes are restricted
-        pass
+        sys.stderr.write(f"Warning: Could not initialize log file: {exc}\n")
 
     return root_logger
 

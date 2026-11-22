@@ -11,7 +11,7 @@ import threading
 import time
 import zipfile
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Set, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Optional, Set, Tuple
 
 from scanner.constants import app_dir, clean_dns_host
 from scanner.logger import get_logger
@@ -26,6 +26,110 @@ except ImportError:
 
 _ACTIVE_PROC_LOCK = threading.Lock()
 _ACTIVE_PROCESSES: Set["_BaseXrayProcess"] = set()
+_PORT_LOCK = threading.Lock()
+_RESERVED_LOCAL_PORTS: Set[int] = set()
+
+_WIN32_JOB_HANDLE: Any = None
+_WIN32_JOB_INIT_DONE: bool = False
+_WIN32_JOB_LOCK = threading.Lock()
+
+
+def _get_win32_job_handle() -> Any:
+    """Initialize a Win32 Job Object with JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE on Windows lazily."""
+    global _WIN32_JOB_HANDLE, _WIN32_JOB_INIT_DONE
+    if platform.system() != "Windows":
+        return None
+    with _WIN32_JOB_LOCK:
+        if _WIN32_JOB_INIT_DONE:
+            return _WIN32_JOB_HANDLE
+        _WIN32_JOB_INIT_DONE = True
+        try:
+            import ctypes
+
+            kernel32 = ctypes.windll.kernel32
+            kernel32.CreateJobObjectW.restype = ctypes.c_void_p
+            kernel32.CreateJobObjectW.argtypes = [ctypes.c_void_p, ctypes.c_wchar_p]
+            kernel32.SetInformationJobObject.restype = ctypes.c_bool
+            kernel32.SetInformationJobObject.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_void_p, ctypes.c_uint32]
+            kernel32.AssignProcessToJobObject.restype = ctypes.c_bool
+            kernel32.AssignProcessToJobObject.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+            kernel32.CloseHandle.restype = ctypes.c_bool
+            kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
+
+            job = kernel32.CreateJobObjectW(None, None)
+            if not job:
+                return None
+
+            class IO_COUNTERS(ctypes.Structure):
+                _fields_ = [
+                    ("ReadOperationCount", ctypes.c_uint64),
+                    ("WriteOperationCount", ctypes.c_uint64),
+                    ("OtherOperationCount", ctypes.c_uint64),
+                    ("ReadTransferCount", ctypes.c_uint64),
+                    ("WriteTransferCount", ctypes.c_uint64),
+                    ("OtherTransferCount", ctypes.c_uint64),
+                ]
+
+            class JOBOBJECT_BASIC_LIMIT_INFORMATION(ctypes.Structure):
+                _fields_ = [
+                    ("PerProcessUserTimeLimit", ctypes.c_int64),
+                    ("PerJobUserTimeLimit", ctypes.c_int64),
+                    ("LimitFlags", ctypes.c_uint32),
+                    ("MinimumWorkingSetSize", ctypes.c_size_t),
+                    ("MaximumWorkingSetSize", ctypes.c_size_t),
+                    ("ActiveProcessLimit", ctypes.c_uint32),
+                    ("Affinity", ctypes.c_size_t),
+                    ("PriorityClass", ctypes.c_uint32),
+                    ("SchedulingClass", ctypes.c_uint32),
+                ]
+
+            class JOBOBJECT_EXTENDED_LIMIT_INFORMATION(ctypes.Structure):
+                _fields_ = [
+                    ("BasicLimitInformation", JOBOBJECT_BASIC_LIMIT_INFORMATION),
+                    ("IoInfo", IO_COUNTERS),
+                    ("ProcessMemoryLimit", ctypes.c_size_t),
+                    ("JobMemoryLimit", ctypes.c_size_t),
+                    ("PeakProcessMemoryLimit", ctypes.c_size_t),
+                    ("PeakJobMemoryLimit", ctypes.c_size_t),
+                ]
+
+            job_info_type = 9  # JobObjectExtendedLimitInformation
+            kill_on_close = 0x00002000  # JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+
+            info = JOBOBJECT_EXTENDED_LIMIT_INFORMATION()
+            info.BasicLimitInformation.LimitFlags = kill_on_close
+
+            res = kernel32.SetInformationJobObject(
+                job,
+                job_info_type,
+                ctypes.byref(info),
+                ctypes.sizeof(info),
+            )
+            if res:
+                _WIN32_JOB_HANDLE = job
+            else:
+                kernel32.CloseHandle(job)
+        except Exception as exc:
+            logger.debug("Initializing Win32 Job Object failed: %s", exc)
+        return _WIN32_JOB_HANDLE
+
+
+def _assign_process_to_job(proc: subprocess.Popen) -> None:
+    """Assign a child subprocess to the Win32 Job Object so it is killed if the parent exits."""
+    if platform.system() != "Windows":
+        return
+    job = _get_win32_job_handle()
+    if not job:
+        return
+    try:
+        import ctypes
+
+        kernel32 = ctypes.windll.kernel32
+        handle = getattr(proc, "_handle", None)
+        if handle:
+            kernel32.AssignProcessToJobObject(job, ctypes.c_void_p(int(handle)))
+    except Exception as exc:
+        logger.debug("Assigning process to Win32 Job Object failed: %s", exc)
 
 
 class XrayStartupError(RuntimeError):
@@ -72,27 +176,58 @@ def terminate_active_xray_processes() -> int:
 
 
 def free_ports(count: int) -> List[int]:
-    """Allocate `count` distinct unused local TCP ports atomically."""
-    sockets: List[socket.socket] = []
-    ports: List[int] = []
-    try:
-        for _ in range(max(0, count)):
-            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            s.bind(("127.0.0.1", 0))
-            sockets.append(s)
-            ports.append(int(s.getsockname()[1]))
-    finally:
-        for s in sockets:
-            try:
-                s.close()
-            except OSError as exc:
-                logger.debug("Closing probe socket failed: %s", exc)
-    return ports
+    """Allocate `count` distinct unused local TCP ports atomically and reserve them."""
+    if count <= 0:
+        return []
+    with _PORT_LOCK:
+        ports: List[int] = []
+        sockets: List[socket.socket] = []
+        try:
+            attempts = 0
+            while len(ports) < count and attempts < 1000:
+                attempts += 1
+                s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                try:
+                    s.bind(("127.0.0.1", 0))
+                    p = int(s.getsockname()[1])
+                    if p not in _RESERVED_LOCAL_PORTS:
+                        sockets.append(s)
+                        ports.append(p)
+                        _RESERVED_LOCAL_PORTS.add(p)
+                    else:
+                        s.close()
+                except OSError:
+                    try:
+                        s.close()
+                    except OSError:
+                        pass
+            if len(ports) < count:
+                for p in ports:
+                    _RESERVED_LOCAL_PORTS.discard(p)
+                raise RuntimeError(f"Could not allocate {count} free local ports (got {len(ports)})")
+            return list(ports)
+        except Exception:
+            for p in ports:
+                _RESERVED_LOCAL_PORTS.discard(p)
+            raise
+        finally:
+            for s in sockets:
+                try:
+                    s.close()
+                except OSError as exc:
+                    logger.debug("Closing probe socket failed: %s", exc)
 
 
 def free_port() -> int:
     """Find and return an unused local TCP port."""
     return free_ports(1)[0]
+
+
+def release_ports(ports: Iterable[int]) -> None:
+    """Release allocated ports from the local reservation registry."""
+    with _PORT_LOCK:
+        for p in ports:
+            _RESERVED_LOCAL_PORTS.discard(p)
 
 
 def wait_ports(ports: List[int], timeout: float, proc: Optional[subprocess.Popen] = None) -> bool:
@@ -112,6 +247,8 @@ def wait_ports(ports: List[int], timeout: float, proc: Optional[subprocess.Popen
             except OSError:
                 remaining.append(p)
         if not remaining:
+            if proc is not None and proc.poll() is not None:
+                return False
             return True
         pending = remaining
         time.sleep(0.03)
@@ -395,6 +532,42 @@ def download_xray_release(
         return False, str(exc).split("\n", 1)[0][:180]
 
 
+VALID_XHTTP_MODES = {"auto", "packet-up", "stream-up", "stream-one"}
+
+
+def _sanitize_xhttp_mode(mode: Optional[str]) -> str:
+    """Ensure xHTTP mode is one of the supported modes (auto, packet-up, stream-up, stream-one)."""
+    m = (mode or "").strip().lower()
+    if m in VALID_XHTTP_MODES:
+        return m
+    return "auto"
+
+
+def _extract_host_header(q: Dict[str, str], default: str) -> str:
+    """Extract host header from host, authority, headers.Host, or JSON headers dict."""
+    if q.get("host"):
+        return clean_dns_host(q["host"])
+    if q.get("authority"):
+        return clean_dns_host(q["authority"])
+    for k, v in q.items():
+        low_k = k.lower()
+        if low_k in ("headers.host", "header.host", "headers[host]"):
+            return clean_dns_host(v)
+    raw_h = q.get("headers") or q.get("header")
+    if raw_h:
+        try:
+            h_obj = json.loads(raw_h)
+            if isinstance(h_obj, dict):
+                for hk, hv in h_obj.items():
+                    if hk.lower() == "host":
+                        if isinstance(hv, list) and hv:
+                            return clean_dns_host(str(hv[0]))
+                        return clean_dns_host(str(hv))
+        except (ValueError, TypeError) as exc:
+            logger.debug("Failed parsing JSON headers in VLESS query: %s", exc)
+    return default
+
+
 def vless_to_xray_outbound(v: VlessConfig, server_ip: str, port: Optional[int] = None) -> Dict[str, Any]:
     """Convert VlessConfig to an Xray outbound configuration dictionary."""
     q = v.query
@@ -402,6 +575,7 @@ def vless_to_xray_outbound(v: VlessConfig, server_ip: str, port: Optional[int] =
     security = (q.get("security") or "none").lower()
     flow = q.get("flow", "")
     target_port = port if port is not None else v.port
+    enc = (q.get("encryption") or "none").strip().lower() or "none"
 
     outbound: Dict[str, Any] = {
         "tag": "proxy",
@@ -411,20 +585,37 @@ def vless_to_xray_outbound(v: VlessConfig, server_ip: str, port: Optional[int] =
                 {
                     "address": server_ip,
                     "port": target_port,
-                    "users": [{"id": v.uuid, "encryption": q.get("encryption", "none")}],
+                    "users": [{"id": v.uuid, "encryption": enc}],
                 }
             ]
         },
         "streamSettings": {"network": network, "security": security},
     }
-    if flow:
-        outbound["settings"]["vnext"][0]["users"][0]["flow"] = flow
+
+    # XTLS flow (e.g. xtls-rprx-vision) is only supported on tcp + tls/reality with encryption='none'
+    valid_flow = flow if (network == "tcp" and security in {"tls", "reality"} and enc == "none") else ""
+    if valid_flow:
+        outbound["settings"]["vnext"][0]["users"][0]["flow"] = valid_flow
+    elif flow:
+        logger.debug(
+            "Omitted invalid flow %r for transport %s with security %s and encryption %s",
+            flow, network, security, enc
+        )
 
     sni = clean_dns_host(q.get("sni") or q.get("servername") or q.get("serverName") or v.host)
     fp = q.get("fp") or q.get("fingerprint") or "chrome"
     alpn = q.get("alpn", "")
 
     if security in {"tls", "reality"}:
+        if security == "reality":
+            pbk = q.get("pbk") or ""
+            if not pbk:
+                raise ValueError("Invalid VLESS REALITY link: missing required public key 'pbk'.")
+            if network not in {"tcp", "xhttp", "grpc"}:
+                raise ValueError(
+                    f"VLESS REALITY only supports 'tcp', 'xhttp', and 'grpc' transports (got '{network}')."
+                )
+
         tls_key = "realitySettings" if security == "reality" else "tlsSettings"
         allow_insecure = any(
             q.get(k, "").strip().lower() in {"1", "true"}
@@ -438,14 +629,13 @@ def vless_to_xray_outbound(v: VlessConfig, server_ip: str, port: Optional[int] =
         if alpn:
             outbound["streamSettings"][tls_key]["alpn"] = [x.strip() for x in alpn.split(",") if x.strip()]
         if security == "reality":
-            if q.get("pbk"):
-                outbound["streamSettings"][tls_key]["publicKey"] = q.get("pbk")
+            outbound["streamSettings"][tls_key]["publicKey"] = q["pbk"]
             if q.get("sid"):
-                outbound["streamSettings"][tls_key]["shortId"] = q.get("sid")
+                outbound["streamSettings"][tls_key]["shortId"] = q["sid"]
             if q.get("spx"):
-                outbound["streamSettings"][tls_key]["spiderX"] = q.get("spx")
+                outbound["streamSettings"][tls_key]["spiderX"] = q["spx"]
 
-    host_header = clean_dns_host(q.get("host") or q.get("authority") or sni)
+    host_header = _extract_host_header(q, sni)
     path = q.get("path") or "/"
 
     if network == "ws":
@@ -455,11 +645,24 @@ def vless_to_xray_outbound(v: VlessConfig, server_ip: str, port: Optional[int] =
             "serviceName": q.get("serviceName") or q.get("serviceNameMode") or q.get("path", "").strip("/")
         }
     elif network in {"http", "h2"}:
-        outbound["streamSettings"]["httpSettings"] = {"path": path, "host": [host_header]}
+        h_cfg: Dict[str, Any] = {"path": path, "host": [host_header]}
+        if q.get("mode"):
+            h_cfg["mode"] = q["mode"]
+        outbound["streamSettings"]["httpSettings"] = h_cfg
     elif network == "httpupgrade":
         outbound["streamSettings"]["httpupgradeSettings"] = {"path": path, "host": host_header}
-    elif network in {"xhttp", "splithttp"}:
-        outbound["streamSettings"]["splithttpSettings"] = {"path": path, "host": host_header}
+    elif network == "xhttp":
+        mode_val = _sanitize_xhttp_mode(q.get("mode"))
+        outbound["streamSettings"]["xhttpSettings"] = {
+            "path": path,
+            "host": host_header,
+            "mode": mode_val,
+        }
+    elif network == "splithttp":
+        s_cfg: Dict[str, Any] = {"path": path, "host": host_header}
+        if q.get("mode"):
+            s_cfg["mode"] = q["mode"]
+        outbound["streamSettings"]["splithttpSettings"] = s_cfg
     elif network == "tcp" and q.get("headerType") == "http":
         outbound["streamSettings"]["tcpSettings"] = {
             "header": {"type": "http", "request": {"path": [path], "headers": {"Host": [host_header]}}}
@@ -483,7 +686,7 @@ def make_xray_config(
                 "listen": "127.0.0.1",
                 "port": socks_port,
                 "protocol": "socks",
-                "settings": {"udp": False},
+                "settings": {"udp": True},
             }
         ],
         "outbounds": [
@@ -511,7 +714,7 @@ def make_batch_xray_config(
             "listen": "127.0.0.1",
             "port": socks_p,
             "protocol": "socks",
-            "settings": {"udp": False},
+            "settings": {"udp": True},
         })
         outbound = vless_to_xray_outbound(v, ip, port=p)
         outbound["tag"] = tag_out
@@ -542,6 +745,7 @@ class _BaseXrayProcess:
     _temp_prefix: str = "rkh_cfs_"
 
     def __init__(self, xray_path: Path, ready_timeout: float = 3.0):
+        self._lock = threading.Lock()
         self.xray_path = xray_path
         self.ready_timeout = ready_timeout
         self.temp_dir: Optional[tempfile.TemporaryDirectory] = None
@@ -582,11 +786,13 @@ class _BaseXrayProcess:
                         cwd=str(xray_dir),
                         env=env,
                     )
+                    _assign_process_to_job(self.proc)
                 finally:
                     err_fp.close()
 
                 if wait_ports(self._ready_ports(), self.ready_timeout, proc=self.proc):
-                    return self
+                    if self.proc is not None and self.proc.poll() is None:
+                        return self
 
                 rc = self.proc.poll()
                 if rc is not None:
@@ -617,53 +823,80 @@ class _BaseXrayProcess:
 
     def close(self) -> None:
         """Safely terminate subprocess and remove temporary configuration directory."""
-        with _ACTIVE_PROC_LOCK:
-            _ACTIVE_PROCESSES.discard(self)
+        if not hasattr(self, "_lock"):
+            return
+        with self._lock:
+            with _ACTIVE_PROC_LOCK:
+                _ACTIVE_PROCESSES.discard(self)
 
-        proc = self.proc
-        self.proc = None
-        if proc is not None:
-            try:
-                proc.terminate()
-                proc.wait(timeout=1.0)
-            except Exception as exc:
-                logger.debug("Clean termination failed, forcing kill: %s", exc)
-            try:
-                if proc.poll() is None:
-                    proc.kill()
-                    proc.wait(timeout=0.5)
-            except Exception as exc:
-                logger.debug("Subprocess kill failed: %s", exc)
+            proc = self.proc
+            self.proc = None
+            if proc is not None:
+                try:
+                    proc.terminate()
+                    proc.wait(timeout=1.0)
+                except Exception as exc:
+                    logger.debug("Clean termination failed, forcing kill: %s", exc)
+                try:
+                    if proc.poll() is None:
+                        proc.kill()
+                        proc.wait(timeout=0.5)
+                except Exception as exc:
+                    logger.debug("Subprocess kill failed: %s", exc)
 
-        temp_dir = self.temp_dir
-        self.temp_dir = None
-        if temp_dir is not None:
+            temp_dir = self.temp_dir
+            self.temp_dir = None
+            if temp_dir is not None:
+                try:
+                    temp_dir.cleanup()
+                except Exception as exc:
+                    logger.debug("Temp directory cleanup failed: %s", exc)
+
             try:
-                temp_dir.cleanup()
+                release_ports(self._ready_ports())
             except Exception as exc:
-                logger.debug("Temp directory cleanup failed: %s", exc)
+                logger.debug("Port release failed: %s", exc)
+
+    def __del__(self) -> None:
+        try:
+            self.close()
+        except Exception as exc:
+            logger.debug("Exception in %s.__del__: %s", self.__class__.__name__, exc)
 
 
 def adapt_config_for_xray_version(cfg: Dict[str, Any], version: Optional[str]) -> Dict[str, Any]:
-    """Adapt generated Xray config for newer Xray-core releases (e.g. >= 26.4)."""
-    ver_tuple = parse_version_tuple(version or "")
-    if not ver_tuple or ver_tuple < (26, 4):
+    """Adapt generated Xray config for newer Xray-core releases.
+
+    - Xray >= 24.12.18 (or unknown version): HTTP/H2 and SplitHTTP migrated to xHTTP; ALPN includes h2; mode is sanitized.
+    - Xray >= 26.1.31 (or unknown version): allowInsecure removed from TLS/Reality outbounds.
+    """
+    raw_tuple = parse_version_tuple(version or "") if version else ()
+    ver_tuple = raw_tuple if raw_tuple else None
+
+    # If an older legacy Xray (< 24.12.18) is detected, preserve legacy configuration verbatim
+    if ver_tuple is not None and ver_tuple < (24, 12, 18):
         return cfg
+
+    needs_xhttp_migration = (ver_tuple is None) or (ver_tuple >= (24, 12, 18))
+    needs_allow_insecure_removal = (ver_tuple is None) or (ver_tuple >= (26, 1, 31))
 
     for outbound in cfg.get("outbounds", []):
         stream = outbound.get("streamSettings")
         if not isinstance(stream, dict):
             continue
-        for tls_key in ("tlsSettings", "realitySettings"):
-            tls_cfg = stream.get(tls_key)
-            if isinstance(tls_cfg, dict) and "allowInsecure" in tls_cfg:
-                was_insecure = bool(tls_cfg.pop("allowInsecure"))
-                if was_insecure and version and version not in _WARNED_REMOVED_ALLOW_INSECURE:
-                    _WARNED_REMOVED_ALLOW_INSECURE.add(version)
-                    logger.warning(
-                        "Xray %s removed 'allowInsecure'; omitting it so Xray can start with standard TLS checks.",
-                        version,
-                    )
+
+        if needs_allow_insecure_removal:
+            for tls_key in ("tlsSettings", "realitySettings"):
+                tls_cfg = stream.get(tls_key)
+                if isinstance(tls_cfg, dict) and "allowInsecure" in tls_cfg:
+                    was_insecure = bool(tls_cfg.pop("allowInsecure"))
+                    if was_insecure and version and version not in _WARNED_REMOVED_ALLOW_INSECURE:
+                        _WARNED_REMOVED_ALLOW_INSECURE.add(version)
+                        logger.warning(
+                            "Xray %s removed 'allowInsecure'; omitting it so Xray can start with standard TLS checks.",
+                            version,
+                        )
+
         ws_cfg = stream.get("wsSettings")
         if isinstance(ws_cfg, dict):
             headers = ws_cfg.get("headers")
@@ -673,20 +906,65 @@ def adapt_config_for_xray_version(cfg: Dict[str, Any], version: Optional[str]) -
                     ws_cfg["host"] = host_val
                 if not headers:
                     ws_cfg.pop("headers", None)
+
         net_type = str(stream.get("network") or "").lower()
-        http_cfg = stream.get("httpSettings")
-        if net_type in ("http", "h2") and isinstance(http_cfg, dict):
-            hosts = http_cfg.get("host")
-            first_host = clean_dns_host(hosts[0] if isinstance(hosts, list) and hosts else str(hosts or ""))
-            xhttp_cfg: Dict[str, Any] = {
-                "path": http_cfg.get("path") or "/",
-                "mode": "stream-one",
-            }
-            if first_host:
-                xhttp_cfg["host"] = first_host
-            stream["network"] = "xhttp"
-            stream["xhttpSettings"] = xhttp_cfg
-            stream.pop("httpSettings", None)
+
+        if needs_xhttp_migration:
+            http_cfg = stream.get("httpSettings")
+            if net_type in ("http", "h2") and isinstance(http_cfg, dict):
+                hosts = http_cfg.get("host")
+                first_host = clean_dns_host(hosts[0] if isinstance(hosts, list) and hosts else str(hosts or ""))
+                mode_val = _sanitize_xhttp_mode(http_cfg.get("mode") or "stream-one")
+                xhttp_cfg: Dict[str, Any] = {
+                    "path": http_cfg.get("path") or "/",
+                    "mode": mode_val,
+                }
+                if first_host:
+                    xhttp_cfg["host"] = first_host
+                stream["network"] = "xhttp"
+                stream["xhttpSettings"] = xhttp_cfg
+                stream.pop("httpSettings", None)
+
+                # Ensure ALPN includes 'h2' for XHTTP over TLS/Reality
+                for tls_key in ("tlsSettings", "realitySettings"):
+                    t_cfg = stream.get(tls_key)
+                    if isinstance(t_cfg, dict):
+                        alpn_list = t_cfg.get("alpn")
+                        if isinstance(alpn_list, list):
+                            if "h2" not in alpn_list:
+                                alpn_list.insert(0, "h2")
+                        else:
+                            t_cfg["alpn"] = ["h2", "http/1.1"]
+
+            split_cfg = stream.pop("splithttpSettings", None)
+            if net_type in ("splithttp", "xhttp") or split_cfg is not None:
+                raw_cfg = split_cfg if isinstance(split_cfg, dict) else (stream.get("xhttpSettings") or {})
+                path_val = raw_cfg.get("path") or "/"
+                host_val = clean_dns_host(raw_cfg.get("host") or "")
+                mode_val = _sanitize_xhttp_mode(raw_cfg.get("mode") or "auto")
+                migrated_xhttp: Dict[str, Any] = {
+                    "path": path_val,
+                    "mode": mode_val,
+                }
+                if host_val:
+                    migrated_xhttp["host"] = host_val
+                stream["network"] = "xhttp"
+                stream["xhttpSettings"] = migrated_xhttp
+
+                # Ensure ALPN includes 'h2'
+                for tls_key in ("tlsSettings", "realitySettings"):
+                    t_cfg = stream.get(tls_key)
+                    if isinstance(t_cfg, dict):
+                        alpn_list = t_cfg.get("alpn")
+                        if isinstance(alpn_list, list):
+                            if "h2" not in alpn_list:
+                                alpn_list.insert(0, "h2")
+                        else:
+                            t_cfg["alpn"] = ["h2", "http/1.1"]
+        else:
+            if net_type == "xhttp" and "xhttpSettings" in stream:
+                m = stream["xhttpSettings"].get("mode")
+                stream["xhttpSettings"]["mode"] = _sanitize_xhttp_mode(m)
     return cfg
 
 
@@ -725,7 +1003,16 @@ class XrayProcess(_BaseXrayProcess):
         return [self.socks_port]
 
     def _reallocate_ports(self) -> None:
-        self.socks_port = free_port()
+        old_ports = self._ready_ports()
+        new_port: Optional[int] = None
+        try:
+            new_port = free_port()
+            self.socks_port = new_port
+            release_ports(old_ports)
+        except Exception:
+            if new_port is not None:
+                release_ports([new_port])
+            raise
 
     @property
     def socks_url(self) -> str:
@@ -768,8 +1055,18 @@ class BatchXrayProcess(_BaseXrayProcess):
         return [sp for _, _, sp in self.endpoint_ports]
 
     def _reallocate_ports(self) -> None:
-        allocated = free_ports(len(self.endpoints))
-        self.endpoint_ports = [(ip, p, sp) for (ip, p), sp in zip(self.endpoints, allocated, strict=True)]
+        old_ports = self._ready_ports()
+        allocated: List[int] = []
+        try:
+            allocated = free_ports(len(self.endpoints))
+            if len(allocated) != len(self.endpoints):
+                raise RuntimeError(f"Requested {len(self.endpoints)} ports, got {len(allocated)}")
+            self.endpoint_ports = [(ip, p, sp) for (ip, p), sp in zip(self.endpoints, allocated, strict=True)]
+            release_ports(old_ports)
+        except Exception:
+            if allocated:
+                release_ports(allocated)
+            raise
 
     def get_proxies_for_endpoint(self, ip: str, port: int) -> Optional[Dict[str, str]]:
         for ep_ip, ep_port, socks_port in self.endpoint_ports:

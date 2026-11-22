@@ -118,4 +118,39 @@ def test_make_vless_link_strips_trailing_dot_in_query():
     assert reparsed.query["host"] == "Static.Fox1.Org"
 
 
+def test_parse_vless_rejects_unc_paths():
+    import pytest
+
+    with pytest.raises(ValueError, match="UNC network paths are not permitted"):
+        parse_vless(r"\\malicious-smb\share\vless.txt")
+
+
+def test_bounded_int_parsing_and_overflow_protection(tmp_path):
+    from scanner.config import ConfigManager, _parse_bounded_int
+
+    # Basic bounds
+    assert _parse_bounded_int("workers", "150", 1, 100) == 100
+    assert _parse_bounded_int("workers", "-5", 1, 100) == 1
+    assert _parse_bounded_int("workers", "35", 1, 100) == 35
+
+    # Overflow protection
+    assert _parse_bounded_int("workers", "1e500", 1, 100) is None
+    assert _parse_bounded_int("workers", "invalid", 1, 100) is None
+
+    # Config file with bounds and UNC output_dir
+    cfg_file = tmp_path / "config.txt"
+    cfg_file.write_text(
+        "workers = 999\n"
+        "output_dir = \\\\attacker.com\\leak\n"
+        "timeout = 1000\n",
+        encoding="utf-8",
+    )
+    mgr = ConfigManager(cfg_file)
+    settings = mgr.load_settings()
+    assert settings.workers == 100
+    assert settings.timeout == 120
+    # Unsafe UNC output_dir should be ignored, leaving default
+    assert not str(settings.output_dir).startswith(("\\\\", "//"))
+
+
 

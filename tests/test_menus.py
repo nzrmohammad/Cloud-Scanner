@@ -141,3 +141,74 @@ def test_key_menus_interactive_loop_simulated_keys(monkeypatch):
     monkeypatch.setattr(menus, "read_key", lambda: next(back_seq))
     with pytest.raises(NavigationBack):
         menus.key_select_menu("Back", rows, allow_back=True)
+
+
+def test_terminal_and_menu_eof_handling(monkeypatch):
+    import builtins
+
+    from scanner.models import NavigationBack
+    from scanner.ui import menus, terminal
+
+    def raise_eof(*a, **kw):
+        raise EOFError
+
+    monkeypatch.setattr(builtins, "input", raise_eof)
+    monkeypatch.setattr(terminal, "RICH", False)
+    monkeypatch.setattr(terminal, "Prompt", None)
+    monkeypatch.setattr(terminal, "Confirm", None)
+
+    # pause should not crash on EOF
+    terminal.pause("msg")
+
+    # prompt_str should return default on EOF
+    assert terminal.prompt_str("msg", default="fallback") == "fallback"
+
+    # prompt_confirm should return default on EOF
+    assert terminal.prompt_confirm("msg", default=True) is True
+    assert terminal.prompt_confirm("msg", default=False) is False
+
+    # prompt_continue_nav should raise NavigationBack on EOF when allow_back=True
+    with pytest.raises(NavigationBack):
+        terminal.prompt_continue_nav("msg", allow_back=True)
+
+    # prompt_continue_nav should return quietly when allow_back=False
+    terminal.prompt_continue_nav("msg", allow_back=False)
+
+    # Non-TTY menus on EOF:
+    monkeypatch.setattr(menus, "terminal_supports_keys", lambda: False)
+    rows = [("Item1", "detail1"), ("Item2", "detail2")]
+
+    with pytest.raises(NavigationBack):
+        menus.key_select_menu("Title", rows, allow_back=True)
+
+    assert menus.key_select_menu("Title", rows, default_index=1, allow_back=False) == 1
+
+    with pytest.raises(NavigationBack):
+        menus.key_multi_select_menu("Title", rows, allow_back=True)
+
+    assert menus.key_multi_select_menu("Title", rows, allow_back=False) == [0, 1]
+
+
+def test_prompt_confirm_nav_zero_is_no(monkeypatch):
+    import builtins
+
+    from scanner.models import NavigationBack
+    from scanner.ui import terminal
+
+    monkeypatch.setattr(terminal, "RICH", False)
+    monkeypatch.setattr(terminal, "Prompt", None)
+
+    # Answering "0" must return False, not raise NavigationBack
+    monkeypatch.setattr(builtins, "input", lambda *a: "0")
+    assert terminal.prompt_confirm_nav("Run speed test?", default=True) is False
+
+    # Answering "1" must return True
+    monkeypatch.setattr(builtins, "input", lambda *a: "1")
+    assert terminal.prompt_confirm_nav("Run speed test?", default=False) is True
+
+    # Answering "b" must raise NavigationBack
+    monkeypatch.setattr(builtins, "input", lambda *a: "b")
+    with pytest.raises(NavigationBack):
+        terminal.prompt_confirm_nav("Run speed test?", default=True)
+
+

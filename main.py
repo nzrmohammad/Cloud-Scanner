@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Cloud Scanner v0.3.0 - Fast, Modular Cloudflare Clean-IP Scanner.
+Cloud Scanner v0.4.0 - Fast, Modular Cloudflare Clean-IP Scanner.
 
 An asynchronous, modular scanner designed to test and rank Cloudflare IP ranges
 against real VLESS + Xray endpoints with latency, jitter, packet loss, download,
@@ -16,7 +16,7 @@ if sys.platform == "win32":
             sys.stdout.reconfigure(encoding="utf-8", errors="replace")
         if hasattr(sys.stderr, "reconfigure"):
             sys.stderr.reconfigure(encoding="utf-8", errors="replace")
-    except Exception:
+    except (AttributeError, OSError, ValueError):
         pass
 
 from scanner.app import CloudScannerApp

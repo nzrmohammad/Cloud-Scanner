@@ -1,6 +1,6 @@
 @echo off
 chcp 65001 >nul
-title Cloud Scanner v0.3.0
+title Cloud Scanner v0.4.0
 
 echo ==============================================================
 echo        Cloud Scanner - Starting environment...
@@ -11,7 +11,7 @@ if exist "venv\Scripts\python.exe" (
     set "PY_CMD=venv\Scripts\python.exe"
 ) else (
     where python >nul 2>nul
-    if %errorlevel% neq 0 (
+    if errorlevel 1 (
         echo [ERROR] Python is not installed or not added to PATH.
         echo Please install Python 3.10+ from https://www.python.org/
         pause
@@ -19,8 +19,12 @@ if exist "venv\Scripts\python.exe" (
     )
 )
 
-:: Install/verify dependencies
-"%PY_CMD%" -m pip install -q -r requirements.txt
+:: Install/verify dependencies only when missing
+"%PY_CMD%" -c "import rich, requests" >nul 2>nul
+if errorlevel 1 (
+    echo [INFO] Installing required dependencies...
+    "%PY_CMD%" -m pip install -q -r requirements.txt
+)
 
 :: Check if Xray Core exists
 if not exist "core\xray.exe" (

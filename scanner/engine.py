@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any, Callable, List, Optional, Tuple, TypeVar
 
 from scanner.analytics import (
+    filter_diverse_endpoints,
     full_sort_key,
     latency_sort_key,
     longevity_sort_key,
@@ -101,14 +102,21 @@ def _run_concurrent_tasks(
         done = 0
         total = len(items)
         for fut in as_completed(futures):
+            item = futures[fut]
             try:
                 res = fut.result()
             except Exception as exc:
-                logger.error("Unhandled exception in %s task: %s", stage_name, exc, exc_info=True)
-                continue
-            results.append(res)
+                logger.error("Unhandled exception in %s task for %s: %s", stage_name, item, exc, exc_info=True)
+                if isinstance(item, tuple) and len(item) >= 2 and isinstance(item[0], str) and isinstance(item[1], int):
+                    res = ScanResult(ip=item[0], port=item[1], ok=False, error=str(exc)[:120])  # type: ignore[assignment]
+                elif isinstance(item, ScanResult):
+                    res = replace(item, ok=False, error=str(exc)[:120])  # type: ignore[assignment]
+                else:
+                    res = None  # type: ignore[assignment]
             done += 1
-            if on_result:
+            if res is not None:
+                results.append(res)
+            if on_result and res is not None:
                 try:
                     on_result(res, done, total)
                 except Exception as exc:
@@ -339,7 +347,12 @@ def _run_upload_probe(
     timeout_s: float,
     rtt_sec: float,
 ) -> Tuple[Optional[float], int, Optional[float], str]:
-    """Execute one streaming upload probe and return (mbps, bytes_sent, duration_s, error)."""
+    """Execute one streaming upload probe and return (mbps, bytes_sent, duration_s, error).
+
+    Measures total network elapsed time (up_elapsed) minus isolated RTT (handshake/latency),
+    clamped to a realistic physical floor (max 0.04s) to prevent loopback buffer traversal
+    from reporting astronomical throughput.
+    """
     payload = StreamUploadPayload(size_bytes)
     up_start = time.perf_counter()
     up_r = session.post(
@@ -350,7 +363,7 @@ def _run_upload_probe(
     )
     up_elapsed = time.perf_counter() - up_start
     if 200 <= up_r.status_code < 400 and up_elapsed > 0.02 and size_bytes > 0:
-        effective = up_elapsed - rtt_sec if (rtt_sec > 0 and up_elapsed > rtt_sec + 0.05) else up_elapsed
+        effective = up_elapsed - rtt_sec if (rtt_sec > 0 and up_elapsed > rtt_sec + 0.02) else up_elapsed
         effective = max(0.04, effective)
         mbps = (size_bytes * 8) / (effective * 1_000_000)
         return round(mbps, 2), size_bytes, round(effective, 3), ""
@@ -416,7 +429,7 @@ def speed_test_ip(
                                         break
                                     w_downloaded += len(chunk)
                                 w_elapsed = time.perf_counter() - w_transfer_start
-                                if w_elapsed > 0.02 and w_downloaded > 0:
+                                if w_elapsed > 0.005 and w_downloaded > 0:
                                     preliminary_mbps = (w_downloaded * 8) / (w_elapsed * 1_000_000)
                     except Exception as exc:
                         logger.debug("Warmup error for %s: %s", out.endpoint, exc)
@@ -476,8 +489,9 @@ def speed_test_ip(
                                         break
 
                                 transfer_elapsed = time.perf_counter() - transfer_start
-                                if transfer_elapsed > 0.04 and burst_downloaded > 0:
-                                    b_mbps = (burst_downloaded * 8) / (transfer_elapsed * 1_000_000)
+                                if transfer_elapsed > 0.005 and burst_downloaded > 0:
+                                    effective_t = max(0.01, transfer_elapsed)
+                                    b_mbps = (burst_downloaded * 8) / (effective_t * 1_000_000)
                                     burst_speeds.append(b_mbps)
                                     total_downloaded += burst_downloaded
                                     total_duration += transfer_elapsed
@@ -535,6 +549,10 @@ def speed_test_ip(
         logger.debug("Speed test failed for %s: %s", out.endpoint, exc)
         out.speed_error = str(exc).split("\n", 1)[0][:100]
 
+    if speed_bytes > 0 and out.speed_mbps is None:
+        out.ok = False
+        out.error = out.speed_error or "Speed benchmark failed"
+
     return out
 
 
@@ -555,6 +573,10 @@ def run_speed_tests(
     abort_event: Optional[threading.Event] = None,
 ) -> List[ScanResult]:
     """Benchmark download and upload speed concurrently across targets."""
+    targets = [r for r in targets if r.ok]
+    if not targets:
+        return []
+
     ev = abort_event or threading.Event()
 
     def _test(r: ScanResult) -> ScanResult:
@@ -598,6 +620,19 @@ def calc_rfc_jitter(latencies: List[float]) -> float:
     return sum(diffs) / len(diffs)
 
 
+def calc_consecutive_jitter(results: List[ScanResult]) -> Optional[float]:
+    """Calculate RFC 3393 jitter strictly between consecutive successful samples without bridging dropped packets."""
+    diffs = []
+    for i in range(1, len(results)):
+        p, c = results[i - 1], results[i]
+        if p.ok and c.ok and p.latency_ms is not None and c.latency_ms is not None:
+            diffs.append(abs(c.latency_ms - p.latency_ms))
+    if not diffs:
+        valid = [r.latency_ms for r in results if r.ok and r.latency_ms is not None]
+        return calc_rfc_jitter(valid) if len(valid) >= 2 else None
+    return sum(diffs) / len(diffs)
+
+
 def summarize_latency(results: List[ScanResult]) -> ScanResult:
     """Calculate statistical latency metrics: median, RFC 3393 jitter, p90, and stddev."""
     if not results:
@@ -616,16 +651,18 @@ def summarize_latency(results: List[ScanResult]) -> ScanResult:
         first_ok_status = next((r.status_code for r in results if r.ok and r.status_code is not None), base.status_code)
         base.status_code = first_ok_status
         base.latency_ms = statistics.median(valid_latencies)
-        base.jitter_ms = calc_rfc_jitter([r.latency_ms for r in results if r.ok and r.latency_ms is not None])
+        base.jitter_ms = calc_consecutive_jitter(results)
         p90 = calc_percentile(valid_latencies, 90.0)
         std_dev = statistics.stdev(valid_latencies) if len(valid_latencies) > 1 else 0.0
-        base.latency_stats = f"median={base.latency_ms:.1f}ms, p90={p90:.1f}ms, stddev={std_dev:.1f}ms"
+        jit_str = f", jitter={base.jitter_ms:.1f}ms" if base.jitter_ms is not None else ""
+        base.latency_stats = f"median={base.latency_ms:.1f}ms, p90={p90:.1f}ms, stddev={std_dev:.1f}ms{jit_str}"
         base.error = ""
         base.ok = True
     else:
         base.ok = False
         base.latency_ms = None
         base.jitter_ms = None
+        base.latency_stats = ""
         base.error = "100% packet loss"
 
     return base
@@ -656,6 +693,11 @@ def retest_ip_latency(
         with XrayProcess(xray, v, ip, port, loglevel=loglevel, ready_timeout=min(3.0, float(timeout))) as xp:
             session = requests.Session()
             session.proxies = xp.proxies
+            # Warm-up probe to establish TCP connection & TLS handshake so samples measure steady-state latency/jitter
+            try:
+                session.get(url, timeout=timeout, headers={"User-Agent": APP_HEADER})
+            except Exception as warmup_exc:
+                logger.debug("Warm-up ping failed for %s:%d: %s", ip, port, warmup_exc)
             try:
                 for i in range(sample_count):
                     if abort_event is not None and abort_event.is_set():
@@ -694,6 +736,7 @@ def retest_ip_latency(
 
     if not samples:
         out = replace(base_result)
+        out.ok = False
         out.error = "Aborted"
         return out
 
@@ -766,35 +809,40 @@ def longevity_test_ip(
     effective_stream_url: str = str(raw_url) if (raw_url and stream_url == DEFAULT_STREAM_URL and str(raw_url).startswith("http")) else str(stream_url)
 
     total_bytes = 0
-    stream_interrupted = False
+    stall_duration = 0.0
     aborted = False
-    fail_time: Optional[float] = None
 
     try:
         with XrayProcess(xray, v, ip, port, loglevel=loglevel, ready_timeout=min(3.0, float(timeout))) as xp:
             start_time = time.perf_counter()
             end_time = start_time + duration
-            last_data_time = start_time
             req_timeout = min(max(float(timeout), 3.0), max(3.0, float(duration)))
 
-            while time.perf_counter() < end_time and not stream_interrupted:
+            while time.perf_counter() < end_time:
                 if abort_event is not None and abort_event.is_set():
                     aborted = True
                     break
+                rem = end_time - time.perf_counter()
+                if rem <= 0.1:
+                    break
+
+                cur_timeout = min(req_timeout, max(1.5, rem))
+                stall_start = time.perf_counter()
                 try:
                     with requests.get(
                         effective_stream_url,
                         proxies=xp.proxies,
-                        timeout=req_timeout,
+                        timeout=cur_timeout,
                         stream=True,
                         headers={"User-Agent": APP_HEADER},
                     ) as r:
                         if not (200 <= r.status_code < 400):
-                            stream_interrupted = True
-                            fail_time = time.perf_counter()
+                            stall_duration += min(cur_timeout, max(0.5, time.perf_counter() - stall_start))
                             logger.debug("Longevity HTTP status %d for %s", r.status_code, out.endpoint)
-                            break
+                            time.sleep(min(0.2, rem))
+                            continue
 
+                        chunk_read = False
                         for chunk in r.iter_content(chunk_size=32 * 1024):
                             if abort_event is not None and abort_event.is_set():
                                 aborted = True
@@ -804,52 +852,55 @@ def longevity_test_ip(
                                     logger.debug("Closing aborted stream failed for %s: %s", out.endpoint, close_exc)
                                 break
                             if chunk:
+                                chunk_read = True
                                 total_bytes += len(chunk)
-                                last_data_time = time.perf_counter()
                             if time.perf_counter() >= end_time:
                                 break
+
+                        if not chunk_read and not aborted:
+                            stall_duration += min(cur_timeout, max(0.5, time.perf_counter() - stall_start))
+                            time.sleep(min(0.2, rem))
+
                 except (requests.exceptions.ReadTimeout, TimeoutError) as exc:
                     if abort_event is not None and abort_event.is_set():
                         aborted = True
                         break
+                    stall_duration += min(cur_timeout, max(1.0, time.perf_counter() - stall_start))
                     logger.debug("Longevity soft-stall (ReadTimeout) for %s: %s", out.endpoint, exc)
-                    stream_interrupted = True
-                    # Attribute loss starting from the last received byte rather than after ReadTimeout fired
-                    fail_time = min(last_data_time, end_time)
-                    break
+                    time.sleep(min(0.2, rem))
+
                 except (requests.exceptions.ConnectionError, OSError) as exc:
                     if abort_event is not None and abort_event.is_set():
                         aborted = True
                         break
+                    stall_duration += min(cur_timeout, max(1.0, time.perf_counter() - stall_start))
                     logger.debug("Longevity hard-drop (ConnectionReset/RST) for %s: %s", out.endpoint, exc)
-                    stream_interrupted = True
-                    fail_time = min(time.perf_counter(), end_time)
-                    break
+                    time.sleep(min(0.2, rem))
+
                 except Exception as exc:
                     if abort_event is not None and abort_event.is_set():
                         aborted = True
                         break
+                    stall_duration += min(cur_timeout, max(1.0, time.perf_counter() - stall_start))
                     logger.debug("Longevity stream failure for %s: %s", out.endpoint, exc)
-                    stream_interrupted = True
-                    fail_time = min(time.perf_counter(), end_time)
-                    break
+                    time.sleep(min(0.2, rem))
 
             if aborted:
                 out.sustained = None
                 out.longevity_loss = None
+                out.ok = False
                 out.error = "Aborted"
                 return out
 
-            if stream_interrupted and fail_time is not None:
-                dropped_time = max(0.0, end_time - fail_time)
-                loss_pct = min(100.0, (dropped_time / max(1e-6, float(duration))) * 100.0)
-            elif total_bytes <= 100_000:
+            elapsed = max(0.1, time.perf_counter() - start_time)
+            raw_loss_pct = min(100.0, (stall_duration / elapsed) * 100.0)
+            if total_bytes == 0:
                 loss_pct = 100.0
             else:
-                loss_pct = 0.0
+                loss_pct = raw_loss_pct
 
             out.longevity_loss = round(loss_pct, 1)
-            out.sustained = bool(total_bytes > 100_000 and loss_pct <= 5.0)
+            out.sustained = bool(loss_pct <= 5.0 and total_bytes >= 1024)
 
     except Exception as exc:
         logger.debug("Longevity test failed for %s: %s", out.endpoint, exc)
@@ -1254,6 +1305,9 @@ def run_speed_stage(
     make_reporter: Optional[Callable[..., Any]] = None,
 ) -> List[ScanResult]:
     """Execute bandwidth download and upload benchmarking with optional UI reporter."""
+    candidates = [c for c in candidates if c.ok]
+    if not candidates:
+        return []
     if download_mb <= 0 and upload_mb <= 0:
         return candidates
     test_upload = upload_mb > 0
@@ -1321,27 +1375,28 @@ def execute_configured_post_scan_tests(
         if top_limit <= 0:
             stability_candidates = sorted_working
         else:
-            stab_cap = top_limit if strict_top_targets else max(top_limit, 50)
+            stab_cap = top_limit if strict_top_targets else max(top_limit * 3, 60)
             stability_candidates = sorted_working[:stab_cap]
 
+        stab_workers = min(settings.workers, 25)
         try:
             rechecked = run_stability_stage(
-                v, stability_candidates, xray, settings.speed_workers, settings.timeout,
+                v, stability_candidates, xray, stab_workers, settings.timeout,
                 settings.ping_samples, settings.test_url, on_stage=on_stage, make_reporter=make_reporter,
             )
         except ScanInterrupted as interrupted:
             return _save_stage_output(interrupted.results or stability_candidates, output_dir, "clean_ips_full_interrupted", v)
 
-        survivors = [r for r in rechecked if r.ok and r.packet_loss < 100.0]
+        survivors = [r for r in rechecked if r.ok and (r.packet_loss is None or r.packet_loss < 100.0)]
         if not survivors:
             if on_message:
                 on_message("No endpoints survived stability test.", "yellow")
             return _save_stage_output(rechecked, output_dir, "clean_ips_rechecked", v)
 
-        # Trim to top_targets before slow 30s longevity & speed stages
+        # Trim to top_targets with IP deduplication and subnet diversity before slow 30s longevity & speed stages
         ranked_survivors = sorted(survivors, key=recheck_sort_key)
         if top_limit > 0 and len(ranked_survivors) > top_limit:
-            ranked_survivors = ranked_survivors[:top_limit]
+            ranked_survivors = filter_diverse_endpoints(ranked_survivors, max_targets=top_limit, max_per_subnet=2)
 
         if settings.longevity_test:
             try:
@@ -1369,9 +1424,10 @@ def execute_configured_post_scan_tests(
 
     # Mode: Stability only
     if mode == "stability":
+        stab_workers = min(settings.workers, 25)
         try:
             rechecked = run_stability_stage(
-                v, candidates, xray, settings.speed_workers, settings.timeout,
+                v, candidates, xray, stab_workers, settings.timeout,
                 settings.ping_samples, settings.test_url, on_stage=on_stage, make_reporter=make_reporter,
             )
         except ScanInterrupted as interrupted:
@@ -1424,6 +1480,7 @@ class ScannerEngine:
         ports: List[int],
         concurrency: int = DEFAULT_CONCURRENCY,
         timeout: int = DEFAULT_TIMEOUT,
+        tries: int = DEFAULT_TRIES,
         url: str = DEFAULT_URL,
         use_tcp_prefilter: bool = True,
         output_dir: Optional[Path] = None,
@@ -1442,6 +1499,7 @@ class ScannerEngine:
             xray=self.xray_path,
             concurrency=concurrency,
             timeout=timeout,
+            tries=tries,
             url=url,
             use_tcp_prefilter=use_tcp_prefilter,
             output_dir=output_dir,
@@ -1506,6 +1564,8 @@ class ScannerEngine:
         upload_mb: int = 1,
         duration: int = 5,
         workers: int = 5,
+        speed_url_template: str = DEFAULT_SPEED_URL,
+        upload_url: str = DEFAULT_UPLOAD_URL,
         on_result: Optional[Callable[[ScanResult, int, int], None]] = None,
     ) -> List[ScanResult]:
         if not self.xray_path:
@@ -1518,9 +1578,10 @@ class ScannerEngine:
             timeout=duration + 10,
             speed_bytes=mb_to_bytes(download_mb),
             speed_duration=duration,
-            speed_url_template=DEFAULT_SPEED_URL,
+            speed_url_template=speed_url_template,
             test_upload=(upload_mb > 0),
             upload_bytes=mb_to_bytes(upload_mb),
+            upload_url=upload_url,
             on_result=on_result,
         )
 

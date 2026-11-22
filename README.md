@@ -7,7 +7,7 @@
 <p align="center">
   <img src="https://img.shields.io/badge/Python-3.10%2B-blue.svg?style=for-the-badge&logo=python&logoColor=white" alt="Python 3.10+" />
   <img src="https://img.shields.io/badge/Architecture-Modular%20OOP-success.svg?style=for-the-badge" alt="Modular OOP" />
-  <img src="https://img.shields.io/badge/Platform-Windows%20%7C%20Linux%20%7C%20macOS-informational.svg?style=for-the-badge" alt="Platform" />
+  <img src="https://img.shields.io/badge/Platform-Windows%20%7C%20Linux-informational.svg?style=for-the-badge" alt="Platform" />
   <img src="https://img.shields.io/badge/Core-Xray--core-orange.svg?style=for-the-badge" alt="Xray Core" />
   <img src="https://img.shields.io/badge/Channel-@Nzrmohammad-brightgreen.svg?style=for-the-badge&logo=telegram" alt="Telegram" />
 </p>
@@ -38,17 +38,17 @@
 - **🔬 Real Xray-core Inbound Testing**: Measures genuine TLS handshakes and latency through temporary in-memory Xray SOCKS5 instances without modifying system proxy settings.
 - **🌍 Physical IP Geo-Location (`IP Loc`)**: Automatically resolves and displays the genuine physical host location, city, and ASN of the clean/relay IP (e.g. `[IR] Tehran`, `[DE] Frankfurt`, `[US] Anycast`) using high-speed multi-threaded queries with thread-safe in-memory caching.
 - **🏢 Cloudflare Edge PoP (`Colo`) Resolution**: Concurrently queries Cloudflare trace via the proxy tunnel to detect the exact Cloudflare edge termination airport code (e.g. `[NL] AMS`, `[TR] IST`, `[DE] FRA`).
-- **🛡️ Anti-Drop / Longevity DPI Endurance Testing**: Evaluates connection endurance over sustained continuous traffic (30s continuous flow) to detect and filter out endpoints dropped or throttled by ISP DPI firewalls.
+- **🛡️ Anti-Drop / Longevity DPI Endurance Testing**: Evaluates connection endurance over sustained continuous traffic (30s continuous flow) with cumulative stall tracking and a rigorous loss threshold (<= 5% packet loss) to detect and filter out endpoints dropped or throttled by ISP DPI firewalls.
 - **🌐 Full IPv4 & IPv6 Support**: Built-in support for official Cloudflare IPv6 clean ranges and subnets alongside classic IPv4 ranges.
 - **📊 Jitter & Packet-Loss Stability Analysis**: Performs multi-sample ping evaluations (RFC 3393 / RFC 3550) to identify ultra-stable connections.
 - **⚡ Real Speed Diagnostics**: Measures real **download** and **upload** throughput (`speed.cloudflare.com`) with warm-up TTFB isolation, adaptive payload sizing, and median-filtered multi-burst measurements.
 - **🧠 Smart Use-Case Recommendations**: Automatically classifies and exports optimal endpoints tailored for:
-  - 🛡️ **Anti-Drop**: 100% sustained connections resistant to censorship throttling.
+  - 🛡️ **Anti-Drop**: Sustained connections (<= 5% cumulative stall/loss) resistant to censorship throttling.
   - 🎮 **Gaming**: Minimal packet loss, consistent ping, and lowest jitter.
-  - 📱 **Streaming / Instagram**: Maximum download/upload bandwidth for videos and stories.
-  - 🌐 **General Browsing**: Fast HTTP handshakes and high reliability.
+  - 📱 **Streaming / Instagram**: Stability-ranked bandwidth (low loss & jitter ahead of raw burst speed) for smooth video playback.
+  - 🌐 **General Browsing**: Lowest latency and fastest initial HTTP handshakes for responsive web browsing.
 - **🔄 Automated Core Downloader & Version Check**: Auto-detects official Xray binaries, checks for newer releases from GitHub, and reports core status on startup.
-- **🎨 Cross-Platform Terminal UI**: Built with [Rich](https://github.com/Textualize/rich), featuring alternate-screen buffer (`Live`), keyboard navigation, interactive menus, and alignment-safe Unicode tables.
+- **🎨 Cross-Platform Terminal UI**: Built with [Rich](https://github.com/Textualize/rich), featuring flicker-free live rendering (`rich.live.Live`), ANSI sequences, keyboard navigation, interactive menus, and alignment-safe Unicode tables.
 - **⚙️ 100% Config-Driven**: Set preferences once in `config.txt` and launch with zero interactive friction.
 - **🗂️ Ready-to-Use Outputs**: Produces CSV reports (with GeoIP & Colo), TXT lists, per-port splits, and ready-to-import `vless://` URLs with location-tagged remarks (e.g. `#Gaming_IR_AMS`).
 
@@ -110,7 +110,7 @@ Cloud_Scanner/
 │   ├── app.py                  # CloudScannerApp: Master CLI/TUI orchestrator
 │   └── ui/                     # Terminal User Interface (TUI)
 │       ├── __init__.py
-│       ├── terminal.py         # Styling, alternate screen buffer, headers, prompts
+│       ├── terminal.py         # Styling, ANSI screen control, persistent headers, prompts
 │       ├── keys.py             # Cross-platform raw keyboard listener (Windows/POSIX)
 │       ├── menus.py            # Flicker-free arrow-driven menus & multi-selectors
 │       └── screens.py          # Startup check, summary tables, results
@@ -245,9 +245,9 @@ All results, benchmarks, and configuration links are saved to the `results/` fol
 | File / Folder | Type | Description |
 | :--- | :---: | :--- |
 | **`scan_summary_report.txt`** | 📋 Summary | **Comprehensive All-In-One Report**: Human-readable diagnostic breakdown covering run metrics, candidate funnel stats (Target Candidates → TCP Alive → Working Xray), smart recommendations, and an aligned benchmark table with Latency, Jitter, Loss, Anti-Drop, Download/Upload speeds, and Cloudflare edge Colo. |
-| **`recommended_configs.txt`** | 🔗 Links | **Curated Ready-to-Use VLESS Links**: Hand-picked configurations categorized for Gaming (lowest jitter/loss), Streaming (max bandwidth), Anti-Drop (100% steady continuous stream), and Balanced usage. |
+| **`recommended_configs.txt`** | 🔗 Links | **Curated Ready-to-Use VLESS Links**: Hand-picked configurations categorized for Gaming (lowest jitter/loss), Streaming (stability-ranked bandwidth), Anti-Drop (steady continuous stream), and Balanced usage. Generated automatically in both interactive TUI and CLI modes (overwritten with a clear notice if no endpoints qualify). |
 | **`clean_ips_full_tested.txt`** | 📄 Text | **Deeply Benchmarked IP List**: Endpoints that successfully completed all post-scan stages (multi-ping stability, 30s DPI endurance, and speed benchmarks) with detailed metrics appended to each line. |
-| **`clean_ips_full_tested_vless.txt`** | 🔗 Links | **Full-Tested VLESS Links**: Ready-to-import `vless://` URLs for all deeply tested endpoints, enriched with remark metrics (`#Remark-104.16.1.1:443-AMS_DL45M_UL12M_Ping42ms`). |
+| **`clean_ips_full_tested_vless.txt`** | 🔗 Links | **Full-Tested VLESS Links**: Ready-to-import `vless://` URLs for all deeply tested endpoints, enriched with remark metrics (`#Remark-104.16.1.1:443-AMS_45.2D_12.3U`). |
 | **`clean_ips.txt`** | 📄 Text | **Initial Stage Working Endpoints**: Endpoints that passed the preliminary single-ping Xray TLS handshake. |
 | **`clean_ips_vless.txt`** | 🔗 Links | **Initial Stage VLESS Links**: Ready-to-import `vless://` URLs generated from the initial latency scan with location tags. |
 | **`clean_ips.csv`** | 📊 CSV | **Structured Dataset**: Full CSV report with dedicated columns (`ip`, `port`, `ip_country`, `ip_city`, `ip_org`, `ip_location`, `download_mbps`, `upload_mbps`, `avg_latency_ms`, `jitter_ms`, `packet_loss_pct`, `anti_drop_sustained`, `colo_code`, `colo_location`) for Excel, Google Sheets, or data pipelines. |
@@ -259,7 +259,7 @@ All results, benchmarks, and configuration links are saved to the `results/` fol
 
 #### 1. Full-Tested Endpoints (`clean_ips_full_tested.txt`)
 ```text
-# Cloud Scanner v0.3.0 - Full Tested Clean Endpoints
+# Cloud Scanner v0.4.0 - Full Tested Clean Endpoints
 # Generated: 2026-10-16 18:00:00
 104.16.1.1:443 | down: 45.20 Mbps | up: 12.30 Mbps | latency: 42.0 ms | jitter: 4.1 ms | loss: 0% | anti-drop: Pass | loc: [US] Anycast | colo: [TR] IST (Istanbul)
 46.38.148.65:2087 | down: 9.90 Mbps | up: 3.20 Mbps | latency: 117.0 ms | jitter: 8.5 ms | loss: 0% | anti-drop: Pass | loc: [IR] Tehran | colo: [NL] AMS (Amsterdam)
@@ -268,7 +268,7 @@ All results, benchmarks, and configuration links are saved to the `results/` fol
 #### 2. Comprehensive Scan Summary (`scan_summary_report.txt`)
 ```text
 ================================================================================
-  CLOUD SCANNER 0.3.0 - COMPREHENSIVE SCAN SUMMARY REPORT
+  CLOUD SCANNER 0.4.0 - COMPREHENSIVE SCAN SUMMARY REPORT
   Generated at: 2026-10-16 18:00:00  |  Telegram: @Nzrmohammad
 ================================================================================
 

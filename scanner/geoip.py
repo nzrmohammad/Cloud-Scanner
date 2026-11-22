@@ -1,11 +1,13 @@
 import bisect
 import ipaddress
 import json
+import os
 import threading
 import time
 import unicodedata
 import urllib.error
 import urllib.request
+import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -32,6 +34,8 @@ def set_geoip_cache_dir(output_dir: Optional[Path]) -> None:
     target = Path(output_dir) / "geoip_cache.json"
     with _CACHE_LOCK:
         if target != _GEOIP_CACHE_FILE:
+            if _GEOIP_CACHE:
+                _flush_cache()
             _GEOIP_CACHE_FILE = target
             _GEOIP_CACHE.clear()
             _GEOIP_CACHE_TS.clear()
@@ -59,13 +63,15 @@ _CACHE_TTL_SECONDS = 30 * 86400
 
 def _decode_varint(data: bytes, pos: int) -> Tuple[int, int]:
     res, shift = 0, 0
-    while True:
+    total_len = len(data)
+    while pos < total_len and shift <= 64:
         b = data[pos]
         pos += 1
         res |= (b & 0x7F) << shift
         if not (b & 0x80):
             return res, pos
         shift += 7
+    raise ValueError(f"Truncated or invalid varint at offset {pos}")
 
 
 def _skip_protobuf_field(data: bytes, pos: int, wire: int) -> Optional[int]:
@@ -77,6 +83,19 @@ def _skip_protobuf_field(data: bytes, pos: int, wire: int) -> Optional[int]:
     if wire == 2:
         length, pos = _decode_varint(data, pos)
         return pos + length
+    if wire == 3:
+        while pos < len(data):
+            tag, pos = _decode_varint(data, pos)
+            gw = tag & 0x7
+            if gw == 4:
+                return pos
+            nxt = _skip_protobuf_field(data, pos, gw)
+            if nxt is None:
+                return None
+            pos = nxt
+        return None
+    if wire == 4:
+        return pos
     if wire == 5:
         return pos + 4
     return None
@@ -122,13 +141,13 @@ def _load_local_geoip_dat() -> None:
     global _LOCAL_GEOIP_V6_RANGES, _LOCAL_GEOIP_V6_STARTS, _LOCAL_GEOIP_V6_MAX_ENDS
     if _LOCAL_GEOIP_LOADED:
         return
-    _LOCAL_GEOIP_LOADED = True
 
     try:
         from scanner.xray import find_asset
 
         dat_path = find_asset("geoip.dat")
         if not dat_path or not dat_path.exists():
+            _LOCAL_GEOIP_LOADED = True
             return
 
         buf = dat_path.read_bytes()
@@ -139,84 +158,89 @@ def _load_local_geoip_dat() -> None:
         v6_mask_all = (1 << 128) - 1
 
         while pos < total_len:
-            tag, pos = _decode_varint(buf, pos)
-            wire = tag & 0x7
-            fnum = tag >> 3
-            if wire == 2:
-                length, pos = _decode_varint(buf, pos)
-                entry_end = min(total_len, pos + length)
-                if fnum == 1:
-                    cc = ""
-                    while pos < entry_end:
-                        stag, pos = _decode_varint(buf, pos)
-                        swire = stag & 0x7
-                        snum = stag >> 3
-                        if swire == 2:
-                            slen, pos = _decode_varint(buf, pos)
-                            sub_end = min(entry_end, pos + slen)
-                            if snum == 1:
-                                cc = buf[pos:sub_end].decode("latin1", errors="ignore").upper()
-                            elif snum == 2 and cc:
-                                cpos = pos
-                                ip_bytes: Optional[bytes] = None
-                                prefix = 32
-                                has_prefix = False
-                                while cpos < sub_end:
-                                    ctag, cpos = _decode_varint(buf, cpos)
-                                    cwire = ctag & 0x7
-                                    cnum = ctag >> 3
-                                    if cwire == 2:
-                                        clen, cpos = _decode_varint(buf, cpos)
-                                        if cnum == 1:
-                                            ip_bytes = buf[cpos : cpos + clen]
-                                        cpos += clen
-                                    elif cwire == 0:
-                                        val, cpos = _decode_varint(buf, cpos)
-                                        if cnum == 2:
-                                            prefix = val
-                                            has_prefix = True
-                                    else:
-                                        nxt = _skip_protobuf_field(buf, cpos, cwire)
-                                        if nxt is None:
-                                            break
-                                        cpos = nxt
-                                if ip_bytes:
-                                    blen = len(ip_bytes)
-                                    if blen == 4:
-                                        p = prefix if has_prefix else 32
-                                        if 0 <= p <= 32:
-                                            net = int.from_bytes(ip_bytes, "big")
-                                            host_bits = 32 - p
-                                            mask = (v4_mask_all ^ ((1 << host_bits) - 1)) if host_bits else v4_mask_all
-                                            start = net & mask
-                                            end = start | ((1 << host_bits) - 1) if host_bits else start
-                                            v4_ranges.append((start, end, cc))
-                                    elif blen == 16:
-                                        p = prefix if has_prefix else 128
-                                        if 0 <= p <= 128:
-                                            net = int.from_bytes(ip_bytes, "big")
-                                            host_bits = 128 - p
-                                            mask = (v6_mask_all ^ ((1 << host_bits) - 1)) if host_bits else v6_mask_all
-                                            start = net & mask
-                                            end = start | ((1 << host_bits) - 1) if host_bits else start
-                                            v6_ranges.append((start, end, cc))
-                            pos = sub_end
-                        else:
-                            nxt = _skip_protobuf_field(buf, pos, swire)
-                            if nxt is None:
-                                pos = entry_end
-                                break
-                            pos = nxt
+            try:
+                tag, pos = _decode_varint(buf, pos)
+                wire = tag & 0x7
+                fnum = tag >> 3
+                if wire == 2:
+                    length, pos = _decode_varint(buf, pos)
+                    entry_end = min(total_len, pos + length)
+                    if fnum == 1:
+                        cc = ""
+                        while pos < entry_end:
+                            stag, pos = _decode_varint(buf, pos)
+                            swire = stag & 0x7
+                            snum = stag >> 3
+                            if swire == 2:
+                                slen, pos = _decode_varint(buf, pos)
+                                sub_end = min(entry_end, pos + slen)
+                                if snum == 1:
+                                    cc = buf[pos:sub_end].decode("latin1", errors="ignore").upper()
+                                elif snum == 2 and cc:
+                                    cpos = pos
+                                    ip_bytes: Optional[bytes] = None
+                                    prefix = 32
+                                    has_prefix = False
+                                    while cpos < sub_end:
+                                        ctag, cpos = _decode_varint(buf, cpos)
+                                        cwire = ctag & 0x7
+                                        cnum = ctag >> 3
+                                        if cwire == 2:
+                                            clen, cpos = _decode_varint(buf, cpos)
+                                            if cnum == 1:
+                                                ip_bytes = buf[cpos : cpos + clen]
+                                            cpos += clen
+                                        elif cwire == 0:
+                                            val, cpos = _decode_varint(buf, cpos)
+                                            if cnum == 2:
+                                                prefix = val
+                                                has_prefix = True
+                                        else:
+                                            nxt = _skip_protobuf_field(buf, cpos, cwire)
+                                            if nxt is None:
+                                                break
+                                            cpos = nxt
+                                    if ip_bytes:
+                                        blen = len(ip_bytes)
+                                        if blen == 4:
+                                            p = prefix if has_prefix else 32
+                                            if 0 <= p <= 32:
+                                                net = int.from_bytes(ip_bytes, "big")
+                                                host_bits = 32 - p
+                                                mask = (v4_mask_all ^ ((1 << host_bits) - 1)) if host_bits else v4_mask_all
+                                                start = net & mask
+                                                end = start | ((1 << host_bits) - 1) if host_bits else start
+                                                v4_ranges.append((start, end, cc))
+                                        elif blen == 16:
+                                            p = prefix if has_prefix else 128
+                                            if 0 <= p <= 128:
+                                                net = int.from_bytes(ip_bytes, "big")
+                                                host_bits = 128 - p
+                                                mask = (v6_mask_all ^ ((1 << host_bits) - 1)) if host_bits else v6_mask_all
+                                                start = net & mask
+                                                end = start | ((1 << host_bits) - 1) if host_bits else start
+                                                v6_ranges.append((start, end, cc))
+                                pos = sub_end
+                            else:
+                                nxt = _skip_protobuf_field(buf, pos, swire)
+                                if nxt is None:
+                                    pos = entry_end
+                                    break
+                                pos = nxt
+                    else:
+                        pos = entry_end
                 else:
-                    pos = entry_end
-            else:
-                nxt = _skip_protobuf_field(buf, pos, wire)
-                if nxt is None:
-                    break
-                pos = nxt
+                    nxt = _skip_protobuf_field(buf, pos, wire)
+                    if nxt is None:
+                        break
+                    pos = nxt
+            except Exception as entry_exc:
+                logger.debug("Stopping local geoip.dat parsing due to entry error at offset %d: %s", pos, entry_exc)
+                break
 
         _LOCAL_GEOIP_RANGES, _LOCAL_GEOIP_STARTS, _LOCAL_GEOIP_MAX_ENDS = _build_interval_index(v4_ranges)
         _LOCAL_GEOIP_V6_RANGES, _LOCAL_GEOIP_V6_STARTS, _LOCAL_GEOIP_V6_MAX_ENDS = _build_interval_index(v6_ranges)
+        _LOCAL_GEOIP_LOADED = True
         logger.debug(
             "Loaded %d IPv4 and %d IPv6 ranges from local geoip.dat",
             len(_LOCAL_GEOIP_RANGES),
@@ -280,18 +304,30 @@ def _flush_cache() -> None:
                 "org": res[2],
                 "ts": _GEOIP_CACHE_TS.get(ip, now),
             }
-        tmp = _GEOIP_CACHE_FILE.with_suffix(".tmp")
-        tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
-        tmp.replace(_GEOIP_CACHE_FILE)
+        tmp = _GEOIP_CACHE_FILE.with_name(f"{_GEOIP_CACHE_FILE.name}.{os.getpid()}_{uuid.uuid4().hex[:8]}.tmp")
+        try:
+            tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
+            tmp.replace(_GEOIP_CACHE_FILE)
+        finally:
+            try:
+                if tmp.exists():
+                    tmp.unlink()
+            except OSError:
+                pass
     except Exception as exc:
         logger.debug("Failed to flush geoip cache: %s", exc)
 
 
-def _save_cache_entry(ip: str, res: Tuple[Optional[str], Optional[str], Optional[str]]) -> None:
+def _save_cache_entry(
+    ip: str,
+    res: Tuple[Optional[str], Optional[str], Optional[str]],
+    flush: bool = True,
+) -> None:
     with _CACHE_LOCK:
         _GEOIP_CACHE[ip] = res
         _GEOIP_CACHE_TS[ip] = time.time()
-        _flush_cache()
+        if flush:
+            _flush_cache()
 
 
 def _sanitize_string(val: Optional[str], max_len: int = 20) -> str:
@@ -306,18 +342,26 @@ def _sanitize_string(val: Optional[str], max_len: int = 20) -> str:
 
 def _provider_available(provider: str) -> bool:
     with _REMOTE_LOCK:
-        return time.monotonic() >= _REMOTE_COOLDOWN_UNTIL.get(provider, 0.0)
+        cooldown_until = _REMOTE_COOLDOWN_UNTIL.get(provider, 0.0)
+        if time.monotonic() >= cooldown_until:
+            if cooldown_until > 0.0:
+                # Cooldown has expired: decay failure streak so subsequent failures ramp up smoothly
+                _REMOTE_COOLDOWN_UNTIL[provider] = 0.0
+                _REMOTE_FAIL_STREAK[provider] = max(1, _REMOTE_FAIL_STREAK.get(provider, 1) - 1)
+            return True
+        return False
 
 
 def _record_provider_outcome(provider: str, success: bool, rate_limited: bool = False) -> None:
     with _REMOTE_LOCK:
         if success:
             _REMOTE_FAIL_STREAK[provider] = 0
+            _REMOTE_COOLDOWN_UNTIL[provider] = 0.0
             return
         streak = _REMOTE_FAIL_STREAK.get(provider, 0) + 1
         _REMOTE_FAIL_STREAK[provider] = streak
         if rate_limited or streak >= 3:
-            cooldown = min(60.0, 5.0 * (2 ** min(streak - 1, 3)))
+            cooldown = min(60.0, 5.0 * (2 ** min(streak - 1, 4)))
             _REMOTE_COOLDOWN_UNTIL[provider] = time.monotonic() + cooldown
 
 
@@ -431,11 +475,7 @@ def resolve_ip_location(
 
     res = (country, city, org)
     if country:
-        with _CACHE_LOCK:
-            _GEOIP_CACHE[ip] = res
-            _GEOIP_CACHE_TS[ip] = time.time()
-            if save_immediately:
-                _flush_cache()
+        _save_cache_entry(ip, res, flush=save_immediately)
     return res
 
 

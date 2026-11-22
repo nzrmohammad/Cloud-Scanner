@@ -84,5 +84,62 @@ def test_set_geoip_cache_dir_clears_memory_and_switches_path(monkeypatch, tmp_pa
     assert geoip._GEOIP_CACHE_FILE == dir2 / "geoip_cache.json"
     assert geoip._GEOIP_CACHE == {}
     assert geoip._GEOIP_CACHE_TS == {}
+    # Unflushed in-memory cache was persisted to old path
+    assert (dir1 / "geoip_cache.json").exists()
+    old_data = json.loads((dir1 / "geoip_cache.json").read_text(encoding="utf-8"))
+    assert "1.2.3.4" in old_data
+
+
+def test_provider_circuit_breaker_decay(monkeypatch):
+    from scanner import geoip
+
+    # Simulate 5 failures
+    for _ in range(5):
+        geoip._record_provider_outcome("test_prov", success=False)
+
+    assert geoip._REMOTE_FAIL_STREAK["test_prov"] == 5
+    # When cooldown expires (set timestamp in past), checking availability decays the streak
+    monkeypatch.setitem(geoip._REMOTE_COOLDOWN_UNTIL, "test_prov", 1.0)
+    assert geoip._provider_available("test_prov") is True
+    assert geoip._REMOTE_FAIL_STREAK["test_prov"] == 4
+
+
+def test_flush_cache_unique_tmp_file_and_cleanup(monkeypatch, tmp_path):
+    import os
+
+    from scanner import geoip
+
+    cache_file = tmp_path / "geoip_cache.json"
+    monkeypatch.setattr(geoip, "_GEOIP_CACHE_FILE", cache_file)
+    monkeypatch.setattr(geoip, "_GEOIP_CACHE", {"8.8.8.8": ("US", "Mountain View", "Google")})
+    monkeypatch.setattr(geoip, "_GEOIP_CACHE_TS", {"8.8.8.8": 12345.0})
+
+    created_tmp_files = []
+    orig_replace = Path.replace
+
+    def spy_replace(self, target):
+        created_tmp_files.append(self)
+        assert f".{os.getpid()}_" in self.name
+        assert self.name.endswith(".tmp")
+        return orig_replace(self, target)
+
+    monkeypatch.setattr(Path, "replace", spy_replace)
+
+    geoip._flush_cache()
+
+    assert cache_file.exists()
+    assert len(created_tmp_files) == 1
+    # Ensure no lingering .tmp files
+    assert list(tmp_path.glob("*.tmp")) == []
+
+    # Verify failure cleanup removes the tmp file
+    def failing_replace(self, target):
+        raise OSError("Simulated disk error during replace")
+
+    monkeypatch.setattr(Path, "replace", failing_replace)
+    geoip._flush_cache()
+    assert list(tmp_path.glob("*.tmp")) == []
+
+
 
 

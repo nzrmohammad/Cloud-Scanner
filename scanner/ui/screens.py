@@ -5,7 +5,6 @@ from typing import Any, List, Optional, Tuple
 from scanner.analytics import (
     apply_result_filters,
     detect_stage_flags,
-    full_sort_key,
     get_smart_recommendations,
     output_sort_key,
     summarize_failure_diagnostics,
@@ -247,7 +246,7 @@ def render_welcome_config_screen(
                 parsed_saved = parse_vless(saved_config)
                 fallback_port = parsed_saved.port
                 info = f"[cyan]{parsed_saved.remark}[/cyan] ([green]{parsed_saved.host}:{parsed_saved.port}[/green])"
-            except Exception:
+            except (ValueError, KeyError, AttributeError):
                 info = saved_config[:40] + ("..." if len(saved_config) > 40 else "")
 
             if settings:
@@ -312,7 +311,7 @@ def read_vless_tui(xray: Optional[Path]) -> VlessConfig:
             try:
                 parse_vless(saved_config)
                 valid_default = saved_config
-            except Exception:
+            except (ValueError, KeyError, AttributeError):
                 valid_default = None
         if not render_welcome_config_screen(xray, error, saved_config=valid_default or ""):
             cprint("\nMissing required runtime files/dependencies. Fix them and run again.", "yellow")
@@ -324,7 +323,7 @@ def read_vless_tui(xray: Optional[Path]) -> VlessConfig:
             raise NavigationExit from None
         if not raw and valid_default:
             raw = valid_default
-        if raw.strip().lower() in {"q", "quit", "exit", "b", "back"}:
+        if is_back_value(raw):
             raise NavigationExit
         try:
             v = parse_vless(raw)
@@ -373,7 +372,7 @@ def ask_max_targets(default: int = MAX_DEFAULT_HOSTS) -> int:
             raise
         except EOFError:
             raise NavigationBack from None
-        except Exception:
+        except ValueError:
             cprint("Enter a positive number, press Enter for unlimited, or type b to go back.", "yellow")
 
 
@@ -543,12 +542,20 @@ def show_final_results(
     display_limit: Optional[int] = 50,
     save_recommendations: bool = True,
 ) -> None:
-    ok = apply_result_filters(results, max_latency_ms=max_latency_ms, min_speed_mbps=min_speed_mbps)
-    is_full, is_speed, is_recheck, is_longevity = detect_stage_flags(filename_prefix, ok)
-    sort_fn = full_sort_key if is_full else output_sort_key(filename_prefix)
+    is_full, is_speed, is_recheck, is_longevity = detect_stage_flags(filename_prefix, results)
+    is_speed_stage = is_speed or is_full
+
+    if is_speed_stage:
+        working_pool = [r for r in results if r.ok and r.speed_mbps is not None and r.speed_mbps > 0]
+        failed = len([r for r in results if not r.ok or r.speed_mbps is None or r.speed_mbps <= 0])
+    else:
+        working_pool = [r for r in results if r.ok]
+        failed = len([r for r in results if not r.ok])
+
+    ok = apply_result_filters(working_pool, max_latency_ms=max_latency_ms, min_speed_mbps=min_speed_mbps)
+    sort_fn = output_sort_key(filename_prefix, ok)
     ok = sorted(ok, key=sort_fn)
-    failed = len([r for r in results if not r.ok])
-    filtered_out = len([r for r in results if r.ok]) - len(ok)
+    filtered_out = len(working_pool) - len(ok)
 
     output_dir = txt_path.parent
     display_items = ok if display_limit is None else ok[:display_limit]
@@ -564,6 +571,10 @@ def show_final_results(
             filter_line = f"\nFiltered out: [bold yellow]{filtered_out}[/bold yellow]"
         console.print(Panel(f"[bold green]Scan Finished[/bold green]\n\nWorking Endpoints: [bold green]{len(ok)}[/bold green]\nFailed Endpoints: [bold red]{failed}[/bold red]{filter_line}", border_style="green", expand=False))
         if not ok and failed > 0:
+            if save_recommendations:
+                from scanner.storage import save_recommended_configs
+
+                save_recommended_configs([], output_dir)
             reasons, hints = summarize_failure_diagnostics(results)
             reason_lines = "\n".join(f"- [red]{count}x[/red] {label}" for label, count in reasons)
             hint_lines = "\n".join(f"• {hint}" for hint in hints)
@@ -577,6 +588,10 @@ def show_final_results(
             )
             return
         if not ok:
+            if save_recommendations:
+                from scanner.storage import save_recommended_configs
+
+                save_recommended_configs([], output_dir)
             console.print(Panel("[bold yellow]No endpoints matched the active filters.[/bold yellow]", border_style="yellow", expand=False))
             return
         shown_count = len(display_items)
@@ -607,7 +622,7 @@ def show_final_results(
                 up = f"{r.upload_mbps:.1f}M" if r.upload_mbps is not None else "-"
                 latency = f"{r.latency_ms:.0f}ms" if r.latency_ms is not None else "-"
                 jitter = f"{r.jitter_ms:.0f}ms" if r.jitter_ms is not None else "-"
-                loss = f"{r.packet_loss:.0f}%"
+                loss = f"{r.packet_loss:.0f}%" if r.packet_loss is not None else "-"
                 recheck = f"{r.recheck_passed}/{r.recheck_total}" if r.recheck_total else "-"
                 row = [str(i), r.ip, str(r.port)]
                 if has_loc:
@@ -654,7 +669,7 @@ def show_final_results(
                 row.append(down)
                 if has_upload:
                     row.append(up)
-                row.append(str(r.download_bytes or "-"))
+                row.append(str(r.download_bytes) if r.speed_mbps is not None else "-")
                 table.add_row(*row)
         elif is_recheck:
             table.add_column("Ping", justify="right", style="green", no_wrap=True)
@@ -667,7 +682,7 @@ def show_final_results(
             for i, r in enumerate(display_items, 1):
                 latency = f"{r.latency_ms:.0f}ms" if r.latency_ms is not None else "-"
                 jitter = f"{r.jitter_ms:.0f}ms" if r.jitter_ms is not None else "-"
-                loss = f"{r.packet_loss:.0f}%"
+                loss = f"{r.packet_loss:.0f}%" if r.packet_loss is not None else "-"
                 recheck = f"{r.recheck_passed}/{r.recheck_total}" if r.recheck_total else "-"
                 row = [str(i), r.ip, str(r.port)]
                 if has_loc:
@@ -698,6 +713,10 @@ def show_final_results(
     else:
         print(f"\nScan Finished | Working: {len(ok)} | Failed: {failed} | Filtered: {filtered_out}")
         if not ok and failed > 0:
+            if save_recommendations:
+                from scanner.storage import save_recommended_configs
+
+                save_recommended_configs([], output_dir)
             reasons, hints = summarize_failure_diagnostics(results)
             print("Failure Breakdown:")
             for label, count in reasons:
@@ -706,6 +725,10 @@ def show_final_results(
                 print(f"  * {hint}")
             return
         if not ok:
+            if save_recommendations:
+                from scanner.storage import save_recommended_configs
+
+                save_recommended_configs([], output_dir)
             print("No endpoints matched the active filters.")
             return
         for i, r in enumerate(display_items, 1):
@@ -717,7 +740,7 @@ def show_final_results(
                 up = f"{r.upload_mbps:.2f} Mbps" if r.upload_mbps is not None else "-"
                 latency = f"{r.latency_ms:.1f} ms" if r.latency_ms is not None else "-"
                 jitter = f"{r.jitter_ms:.1f} ms" if r.jitter_ms is not None else "-"
-                loss = f"{r.packet_loss:.0f}%"
+                loss = f"{r.packet_loss:.0f}%" if r.packet_loss is not None else "-"
                 recheck = f"{r.recheck_passed}/{r.recheck_total}" if r.recheck_total else "-"
                 drop_txt = f" anti_drop={'OK' if r.sustained else 'DROP'}" if r.sustained is not None else ""
                 print(f"{i}. {r.endpoint}{loc_str}{colo_str} down={down} up={up} latency={latency} jitter={jitter} loss={loss}{drop_txt} pass={recheck} HTTP {http_str}")
@@ -733,10 +756,10 @@ def show_final_results(
             elif is_recheck:
                 latency = f"{r.latency_ms:.1f} ms" if r.latency_ms is not None else "-"
                 jitter = f"{r.jitter_ms:.1f} ms" if r.jitter_ms is not None else "-"
-                loss = f"{r.packet_loss:.0f}%"
+                loss = f"{r.packet_loss:.0f}%" if r.packet_loss is not None else "-"
                 recheck = f"{r.recheck_passed}/{r.recheck_total}" if r.recheck_total else "-"
                 drop_txt = f" anti_drop={'OK' if r.sustained else 'DROP'}" if r.sustained is not None else ""
-                print(f"{i}. {r.endpoint}{loc_str}{colo_str} latency_avg={latency} jitter={jitter} loss={loss}{drop_txt} pass={recheck} HTTP {http_str}")
+                print(f"{i}. {r.endpoint}{loc_str}{colo_str} latency={latency} jitter={jitter} loss={loss}{drop_txt} pass={recheck} HTTP {http_str}")
             else:
                 latency = f"{r.latency_ms:.1f} ms" if r.latency_ms is not None else "-"
                 print(f"{i}. {r.endpoint}{loc_str}{colo_str} latency={latency} HTTP {http_str}")

@@ -1,9 +1,14 @@
 import argparse
 import sys
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import List, Optional, Set, Tuple
 
-from scanner.analytics import apply_result_filters, get_smart_recommendations
+from scanner.analytics import (
+    apply_result_filters,
+    filter_diverse_endpoints,
+    get_smart_recommendations,
+    recheck_sort_key,
+)
 from scanner.config import ConfigManager, load_saved_vless_config, parse_vless, save_vless_config
 from scanner.constants import (
     APP_HEADER,
@@ -34,7 +39,11 @@ from scanner.models import (
     ScanResult,
     VlessConfig,
 )
-from scanner.storage import save_results, save_scan_summary_report
+from scanner.storage import (
+    save_recommended_configs,
+    save_results,
+    save_scan_summary_report,
+)
 from scanner.targets import expand_targets, print_isp_catalog_cli, resolve_isp_files
 from scanner.ui import (
     check_and_prompt_xray_update,
@@ -78,13 +87,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--url", default=DEFAULT_URL)
     p.add_argument("--loglevel", choices=["debug", "info", "warning", "error", "none"], default="warning")
     p.add_argument("--recheck", action="store_true", help="After the first scan, re-test working IPs and save updated results")
-    p.add_argument("--recheck-samples", type=int, default=5, help="Latency tests per working IP during --recheck")
+    p.add_argument("--recheck-samples", type=int, default=8, help="Latency tests per working IP during --recheck")
     p.add_argument("--recheck-workers", type=int, default=None, help="Workers for --recheck. Default: same as --concurrency")
+    p.add_argument("--top-targets", type=int, default=None, help="Maximum endpoints to benchmark in post-scan stages (default: 30, 0=all)")
     p.add_argument("--longevity-test", action="store_true", help="Run Anti-Drop endurance test against DPI throttling for working endpoints")
     p.add_argument("--longevity-duration", type=int, default=DEFAULT_LONGEVITY_DURATION, help=f"Duration in seconds for Anti-Drop test (default: {DEFAULT_LONGEVITY_DURATION})")
     p.add_argument("--speed-test", action="store_true", help="Run a download speed test for working IPs after scanning/recheck")
-    p.add_argument("--speed-workers", type=int, default=5, help="Workers for speed testing")
-    p.add_argument("--speed-mb", type=int, default=5, help="Download size per IP in MB")
+    p.add_argument("--speed-workers", type=int, default=6, help="Workers for speed testing")
+    p.add_argument("--speed-mb", type=int, default=3, help="Download size per IP in MB")
     p.add_argument("--speed-upload-mb", type=int, default=1, help="Upload size per IP in MB (default: 1, set 0 to disable)")
     p.add_argument("--skip-upload-test", action="store_true", help="Skip upload speed testing during speed test")
     p.add_argument("--speed-duration", type=int, default=5, help="Duration limit for each speed test in seconds")
@@ -97,6 +107,20 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--isp", nargs="*", help="ISP names/stems to use from --isp-category, or all")
     p.add_argument("--sample-large-ranges", action="store_true", help="Evenly sample ranges when selected targets exceed a positive --max-hosts value")
     return p
+
+
+def get_explicit_cli_keys(parser: argparse.ArgumentParser, argv: Optional[List[str]]) -> Set[str]:
+    """Identify which CLI arguments were explicitly provided on the command line (resolves abbreviations)."""
+    import copy
+
+    shadow_parser = copy.deepcopy(parser)
+    for action in shadow_parser._actions:
+        action.default = argparse.SUPPRESS
+    try:
+        ns = shadow_parser.parse_args(argv if argv is not None else sys.argv[1:])
+        return set(vars(ns).keys())
+    except Exception:
+        return set()
 
 
 def _run_scan_with_tracking(
@@ -244,7 +268,9 @@ class CloudScannerApp:
             while True:
                 try:
                     targets, target_label = select_targets_tui(v=v, settings=settings)
-                except (NavigationBack, NavigationExit):
+                except NavigationBack:
+                    break
+                except NavigationExit:
                     render_stage("Exited", "No scan was started.", "yellow")
                     return 0
 
@@ -256,6 +282,10 @@ class CloudScannerApp:
                 set_geoip_cache_dir(output_dir)
 
                 while True:
+                    self.last_results = []
+                    self.last_txt = None
+                    self.last_csv = None
+                    self.last_prefix = "clean_ips"
                     total_endpoints = len(build_target_pairs(targets, ports))
                     est_time = max(3, int(total_endpoints / max(1, settings.workers * 2)))
 
@@ -362,6 +392,10 @@ class CloudScannerApp:
                     if action == "retest_same":
                         continue
                     elif action == "rescan_all":
+                        self.last_results = []
+                        self.last_txt = None
+                        self.last_csv = None
+                        self.last_prefix = "clean_ips"
                         break
                     else:
                         render_stage("Scanner Finished", "Thank you for using Cloud Scanner!", "green")
@@ -373,8 +407,12 @@ class CloudScannerApp:
             print_isp_catalog_cli(cprint)
             return 0
 
+        is_config_file = not args.config or not args.config.startswith("vless://")
+        cfg_mgr = ConfigManager(args.config) if (args.config and not args.config.startswith("vless://")) else self.config_manager
+        settings = cfg_mgr.load_settings()
+
         using_isp_cli = bool(args.isp_category)
-        cfg_val = args.config or load_saved_vless_config()
+        cfg_val = args.config if (args.config and args.config.startswith("vless://")) else (settings.vless_raw or load_saved_vless_config())
 
         if not cfg_val or (not args.targets and not using_isp_cli):
             self.parser.error(
@@ -390,7 +428,9 @@ class CloudScannerApp:
             cprint("Missing dependency: pip install requests[socks] rich", "red")
             return 2
 
-        out_dir = Path(args.output_dir)
+        explicit_keys = get_explicit_cli_keys(self.parser, self.argv)
+
+        out_dir = Path(args.output_dir) if "output_dir" in explicit_keys else settings.output_dir
         setup_logging(out_dir)
         set_geoip_cache_dir(out_dir)
 
@@ -401,20 +441,120 @@ class CloudScannerApp:
             if args.all_cf_tls_ports:
                 ports = list(DEFAULT_CF_TLS_PORTS)
             elif args.ports:
-                ports = [int(p.strip()) for p in args.ports.split(",") if p.strip()]
+                if args.ports.strip().lower() == "config":
+                    if is_config_file and settings.ports:
+                        ports = [p for p in settings.ports if 1 <= p <= 65535]
+                    else:
+                        ports = [v.port]
+                else:
+                    ports = [int(p.strip()) for p in args.ports.split(",") if p.strip()]
+                    for p in ports:
+                        if not (1 <= p <= 65535):
+                            raise ValueError(f"Port must be between 1 and 65535: {p}")
+            elif is_config_file and settings.ports:
+                ports = [p for p in settings.ports if 1 <= p <= 65535]
+                if not ports:
+                    ports = [v.port]
             else:
                 ports = [v.port]
 
-            use_tcp_prefilter = not args.skip_tcp_prefilter
+            # Recheck / longevity / speed flags
+            recheck_enabled = bool(args.recheck)
+            longevity_enabled = bool(args.longevity_test)
+            speed_enabled = bool(args.speed_test)
+            if args.min_speed > 0:
+                speed_enabled = True
+
+            has_explicit_post = bool(
+                "recheck" in explicit_keys
+                or "longevity_test" in explicit_keys
+                or "speed_test" in explicit_keys
+                or "min_speed" in explicit_keys
+            )
+            if is_config_file and not has_explicit_post:
+                mode = (settings.post_scan_mode or "none").lower()
+                if mode == "full":
+                    recheck_enabled = True
+                    longevity_enabled = True
+                    speed_enabled = True
+                elif mode == "stability":
+                    recheck_enabled = True
+                elif mode == "longevity":
+                    recheck_enabled = True
+                    longevity_enabled = True
+                elif mode == "speed":
+                    speed_enabled = True
+
+                if mode == "none" and settings.longevity_test:
+                    longevity_enabled = True
+
+            concurrency: int = (
+                max(1, int(args.concurrency))
+                if "concurrency" in explicit_keys
+                else (max(1, int(settings.workers)) if settings.workers else DEFAULT_CONCURRENCY)
+            )
+            timeout: int = (
+                max(1, int(args.timeout))
+                if "timeout" in explicit_keys
+                else (max(1, int(settings.timeout)) if settings.timeout else DEFAULT_TIMEOUT)
+            )
+            max_hosts: int = (
+                max(0, int(args.max_hosts))
+                if "max_hosts" in explicit_keys
+                else (max(0, int(settings.max_targets)) if settings.max_targets != MAX_DEFAULT_HOSTS else MAX_DEFAULT_HOSTS)
+            )
+            speed_workers: int = (
+                max(1, int(args.speed_workers))
+                if "speed_workers" in explicit_keys
+                else (max(1, int(settings.speed_workers)) if settings.speed_workers else 6)
+            )
+            download_mb: int = (
+                int(args.speed_mb)
+                if "speed_mb" in explicit_keys
+                else (int(settings.download_mb) if settings.download_mb is not None else 3)
+            )
+            upload_mb: int = (
+                0 if args.skip_upload_test else (
+                    int(args.speed_upload_mb)
+                    if "speed_upload_mb" in explicit_keys
+                    else (int(settings.upload_mb) if settings.upload_mb is not None else 1)
+                )
+            )
+            longevity_duration: int = (
+                max(1, int(args.longevity_duration))
+                if "longevity_duration" in explicit_keys
+                else (max(1, int(settings.longevity_duration)) if settings.longevity_duration is not None else DEFAULT_LONGEVITY_DURATION)
+            )
+            speed_duration: int = (
+                max(1, int(args.speed_duration))
+                if "speed_duration" in explicit_keys
+                else (max(1, int(settings.speed_duration)) if settings.speed_duration is not None else 5)
+            )
+            recheck_samples: int = (
+                max(1, int(args.recheck_samples))
+                if "recheck_samples" in explicit_keys
+                else (max(1, int(settings.ping_samples)) if settings.ping_samples else 8)
+            )
+            test_url: str = (
+                str(args.url)
+                if "url" in explicit_keys
+                else (str(settings.test_url) if settings.test_url else DEFAULT_URL)
+            )
+            use_tcp_prefilter: bool = (
+                False
+                if "skip_tcp_prefilter" in explicit_keys and args.skip_tcp_prefilter
+                else (bool(settings.tcp_prefilter) if is_config_file else not args.skip_tcp_prefilter)
+            )
+            recheck_workers: int = args.recheck_workers if args.recheck_workers is not None else concurrency
 
             if using_isp_cli:
                 isp_files = resolve_isp_files(args.isp_category, args.isp)
                 if not isp_files:
                     raise ValueError(f"No ISP files found for category: {args.isp_category}")
-                targets = expand_targets([str(p) for p in isp_files], args.max_hosts, sample_if_too_many=True)
+                targets = expand_targets([str(p) for p in isp_files], max_hosts, sample_if_too_many=True)
                 cprint(f"Loaded {len(targets)} target(s) from {args.isp_category} ISP list.", "green")
             else:
-                targets = expand_targets(args.targets, args.max_hosts, sample_if_too_many=args.sample_large_ranges)
+                targets = expand_targets(args.targets, max_hosts, sample_if_too_many=args.sample_large_ranges)
         except Exception as e:
             cprint(str(e), "red")
             return 2
@@ -426,158 +566,193 @@ class CloudScannerApp:
                 targets=targets,
                 ports=ports,
                 xray=xray,
-                concurrency=args.concurrency,
-                timeout=args.timeout,
+                concurrency=concurrency,
+                timeout=timeout,
                 tries=args.tries,
-                url=args.url,
+                url=test_url,
                 loglevel=args.loglevel,
                 use_tcp_prefilter=use_tcp_prefilter,
                 output_dir=out_dir,
                 total_endpoints=total_prefilter,
             )
+            has_post_scan = bool(recheck_enabled or longevity_enabled or speed_enabled)
+            final_results = [r for r in results if r.ok]
+            initial_ok_count = len(final_results)
+            final_prefix = "clean_ips"
+            if not has_post_scan and final_results:
+                enrich_results_with_colo(v, final_results, xray, workers=min(concurrency, 20), timeout=timeout)
             txt, csvp = save_results(results, out_dir, "clean_ips", vless_config=v)
         except ScanInterrupted as interrupted:
             results = interrupted.results
             txt, csvp = save_results(results, out_dir, "clean_ips_interrupted", vless_config=v)
             cprint("Ctrl+C detected. Partial scan results were saved.", "yellow")
-            show_final_results(results, txt, csvp, vless_config=v)
+            show_final_results(results, txt, csvp, vless_config=v, save_recommendations=False)
             return 130
 
-        show_final_results(results, txt, csvp, vless_config=v)
-        final_results = [r for r in results if r.ok]
-        final_prefix = "clean_ips"
+        show_final_results(results, txt, csvp, vless_config=v, save_recommendations=False)
 
-        if args.recheck and final_results:
+        top_limit: int = (
+            max(0, int(args.top_targets))
+            if "top_targets" in explicit_keys and args.top_targets is not None
+            else (max(0, int(settings.top_targets)) if settings.top_targets is not None else 30)
+        )
+        if has_post_scan and top_limit > 0 and len(final_results) > top_limit:
+            if longevity_enabled or speed_enabled:
+                screen_cap = max(top_limit * 3, 60)
+                if len(final_results) > screen_cap:
+                    final_results = sorted(final_results, key=lambda r: (r.latency_ms if r.latency_ms is not None else 10**12))[:screen_cap]
+            else:
+                final_results = filter_diverse_endpoints(
+                    sorted(final_results, key=lambda r: (r.latency_ms if r.latency_ms is not None else 10**12)),
+                    max_targets=top_limit,
+                    max_per_subnet=2,
+                )
+
+        if recheck_enabled and final_results:
+            final_results = [r for r in final_results if r.ok]
             try:
                 final_results = run_stability_stage(
                     v,
                     final_results,
                     xray,
-                    args.recheck_workers or args.concurrency,
-                    args.timeout,
-                    args.recheck_samples,
-                    args.url,
+                    recheck_workers,
+                    timeout,
+                    recheck_samples,
+                    test_url,
                     args.loglevel,
                     on_stage=render_stage,
                     make_reporter=progress_reporter,
                 )
-                if not args.longevity_test and not args.speed_test:
-                    enrich_results_with_colo(v, final_results, xray, workers=args.recheck_workers or args.concurrency, timeout=args.timeout)
+                if not longevity_enabled and not speed_enabled:
+                    enrich_results_with_colo(v, final_results, xray, workers=recheck_workers, timeout=timeout)
                 final_prefix = "clean_ips_rechecked"
                 txt, csvp = save_results(final_results, out_dir, final_prefix, vless_config=v)
             except ScanInterrupted as interrupted:
                 final_results = interrupted.results
                 txt, csvp = save_results(final_results, out_dir, "clean_ips_rechecked_interrupted", vless_config=v)
                 cprint("Ctrl+C detected. Partial re-check results were saved.", "yellow")
-                show_final_results(final_results, txt, csvp, filename_prefix="clean_ips_rechecked", vless_config=v)
+                show_final_results(final_results, txt, csvp, filename_prefix="clean_ips_rechecked", vless_config=v, save_recommendations=False)
                 return 130
-            show_final_results(final_results, txt, csvp, filename_prefix=final_prefix, vless_config=v)
+            show_final_results(final_results, txt, csvp, filename_prefix=final_prefix, vless_config=v, save_recommendations=False)
 
-        if args.longevity_test and final_results:
+        if longevity_enabled and final_results:
+            final_results = [r for r in final_results if r.ok]
+            if top_limit > 0 and len(final_results) > top_limit:
+                final_results = filter_diverse_endpoints(
+                    sorted(final_results, key=recheck_sort_key if recheck_enabled else lambda r: (r.latency_ms if r.latency_ms is not None else 10**12)),
+                    max_targets=top_limit,
+                    max_per_subnet=2,
+                )
             try:
                 final_results = run_longevity_stage(
                     v,
                     final_results,
                     xray,
-                    args.speed_workers,
-                    args.longevity_duration,
-                    args.timeout,
+                    speed_workers,
+                    longevity_duration,
+                    timeout,
                     args.loglevel,
                     on_stage=render_stage,
                     make_reporter=progress_reporter,
                 )
-                if not args.speed_test:
-                    enrich_results_with_colo(v, final_results, xray, workers=args.speed_workers, timeout=args.timeout)
+                if not speed_enabled:
+                    enrich_results_with_colo(v, final_results, xray, workers=speed_workers, timeout=timeout)
                 final_prefix = "clean_ips_longevity"
                 txt, csvp = save_results(final_results, out_dir, final_prefix, vless_config=v)
             except ScanInterrupted as interrupted:
                 final_results = interrupted.results
                 txt, csvp = save_results(final_results, out_dir, "clean_ips_longevity_interrupted", vless_config=v)
                 cprint("Ctrl+C detected. Partial anti-drop results were saved.", "yellow")
-                show_final_results(final_results, txt, csvp, filename_prefix="clean_ips_longevity", vless_config=v)
+                show_final_results(final_results, txt, csvp, filename_prefix="clean_ips_longevity", vless_config=v, save_recommendations=False)
                 return 130
-            show_final_results(final_results, txt, csvp, filename_prefix=final_prefix, vless_config=v)
+            show_final_results(final_results, txt, csvp, filename_prefix=final_prefix, vless_config=v, save_recommendations=False)
 
-        if args.speed_test and final_results:
+        if speed_enabled and final_results:
+            final_results = [r for r in final_results if r.ok]
+            if top_limit > 0 and len(final_results) > top_limit:
+                final_results = filter_diverse_endpoints(
+                    sorted(final_results, key=recheck_sort_key if recheck_enabled else lambda r: (r.latency_ms if r.latency_ms is not None else 10**12)),
+                    max_targets=top_limit,
+                    max_per_subnet=2,
+                )
             try:
-                upload_mb = 0 if args.skip_upload_test else args.speed_upload_mb
                 final_results = run_speed_stage(
                     v,
                     final_results,
                     xray,
-                    args.speed_workers,
-                    args.speed_duration,
+                    speed_workers,
+                    speed_duration,
                     args.speed_timeout,
-                    args.speed_mb,
+                    download_mb,
                     upload_mb=upload_mb,
                     speed_url=args.speed_url,
                     loglevel=args.loglevel,
                     on_stage=render_stage,
                     make_reporter=progress_reporter,
                 )
-                enrich_results_with_colo(v, final_results, xray, workers=args.speed_workers, timeout=args.timeout)
-                final_prefix = "clean_ips_speed_tested"
+                enrich_results_with_colo(v, final_results, xray, workers=speed_workers, timeout=timeout)
+                if recheck_enabled and longevity_enabled:
+                    final_prefix = "clean_ips_full_tested"
+                else:
+                    final_prefix = "clean_ips_speed_tested"
                 txt, csvp = save_results(final_results, out_dir, final_prefix, include_speed_errors=True, vless_config=v)
             except ScanInterrupted as interrupted:
                 final_results = interrupted.results
-                txt, csvp = save_results(final_results, out_dir, "clean_ips_speed_tested_interrupted", include_speed_errors=True, vless_config=v)
+                interrupted_prefix = "clean_ips_full_interrupted" if (recheck_enabled and longevity_enabled) else "clean_ips_speed_tested_interrupted"
+                txt, csvp = save_results(final_results, out_dir, interrupted_prefix, include_speed_errors=True, vless_config=v)
                 cprint("Ctrl+C detected. Partial speed-test results were saved.", "yellow")
-                show_final_results(final_results, txt, csvp, filename_prefix="clean_ips_speed_tested", vless_config=v)
+                show_final_results(final_results, txt, csvp, filename_prefix=interrupted_prefix, vless_config=v, save_recommendations=False)
                 return 130
-            show_final_results(final_results, txt, csvp, filename_prefix=final_prefix, vless_config=v)
+            show_final_results(final_results, txt, csvp, filename_prefix=final_prefix, vless_config=v, save_recommendations=False)
 
-        if final_results:
-            if not args.recheck and not args.longevity_test and not args.speed_test:
-                enrich_results_with_colo(v, final_results, xray, workers=min(args.concurrency, 20), timeout=args.timeout)
-                save_results(final_results, out_dir, "clean_ips", vless_config=v)
-
-            summary_results = final_results
-            if args.max_latency > 0 or args.min_speed > 0:
-                filtered_prefix = f"{final_prefix}_filtered" if final_prefix != "clean_ips" else "clean_ips_filtered"
-                txt, csvp = save_results(
-                    final_results,
-                    out_dir,
-                    filtered_prefix,
-                    max_latency_ms=args.max_latency,
-                    min_speed_mbps=args.min_speed,
-                    include_speed_errors=args.speed_test,
-                    vless_config=v,
-                )
-                show_final_results(
-                    final_results,
-                    txt,
-                    csvp,
-                    max_latency_ms=args.max_latency,
-                    min_speed_mbps=args.min_speed,
-                    filename_prefix=filtered_prefix,
-                    vless_config=v,
-                )
-                summary_results = apply_result_filters(
-                    final_results, max_latency_ms=args.max_latency, min_speed_mbps=args.min_speed
-                )
-
-            recs = get_smart_recommendations(summary_results, v) if summary_results else []
-            save_scan_summary_report(
+        summary_results = [r for r in final_results if r.ok] if final_results else []
+        if summary_results and (args.max_latency > 0 or args.min_speed > 0):
+            filtered_prefix = f"{final_prefix}_filtered" if final_prefix != "clean_ips" else "clean_ips_filtered"
+            txt, csvp = save_results(
                 summary_results,
                 out_dir,
+                filtered_prefix,
+                max_latency_ms=args.max_latency,
+                min_speed_mbps=args.min_speed,
+                include_speed_errors=speed_enabled,
                 vless_config=v,
-                total_targets_count=total_prefilter,
-                tcp_alive_count=tcp_alive_count,
-                recommendations=recs,
-                initial_ok_count=len(final_results),
             )
+            show_final_results(
+                summary_results,
+                txt,
+                csvp,
+                max_latency_ms=args.max_latency,
+                min_speed_mbps=args.min_speed,
+                filename_prefix=filtered_prefix,
+                vless_config=v,
+                save_recommendations=False,
+            )
+            summary_results = apply_result_filters(
+                summary_results, max_latency_ms=args.max_latency, min_speed_mbps=args.min_speed
+            )
+
+        recs = get_smart_recommendations(summary_results, v) if summary_results else []
+        save_recommended_configs(recs, out_dir)
+        save_scan_summary_report(
+            summary_results,
+            out_dir,
+            settings=settings if is_config_file else None,
+            vless_config=v,
+            total_targets_count=total_prefilter,
+            tcp_alive_count=tcp_alive_count,
+            recommendations=recs,
+            initial_ok_count=initial_ok_count,
+        )
         return 0
 
     def run(self) -> int:
         """Parse arguments and branch into interactive or CLI mode."""
-        args = self.parser.parse_args(self.argv)
-        using_isp_cli = bool(args.isp_category)
-
-        if not args.config and not args.targets and not using_isp_cli and not args.list_isps:
+        if not self.argv:
             try:
                 return self.interactive()
             except KeyboardInterrupt:
                 cprint("\nCanceled by user.", "yellow")
                 return 130
 
+        args = self.parser.parse_args(self.argv)
         return self.run_cli(args)

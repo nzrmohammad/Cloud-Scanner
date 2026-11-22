@@ -3,6 +3,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from scanner.constants import (
+    DEFAULT_CF_TLS_PORTS,
     DEFAULT_CONCURRENCY,
     DEFAULT_LONGEVITY_DURATION,
     DEFAULT_TIMEOUT,
@@ -43,7 +44,7 @@ class ScanResult:
     upload_error: str = ""
     recheck_passed: int = 0
     recheck_total: int = 0
-    packet_loss: float = 0.0
+    packet_loss: Optional[float] = None
     jitter_ms: Optional[float] = None
     sustained: Optional[bool] = None
     longevity_loss: Optional[float] = None
@@ -81,7 +82,7 @@ class TargetSource:
 @dataclass
 class AppSettings:
     vless_raw: str = ""
-    ports: List[int] = field(default_factory=lambda: [443, 8443, 2053, 2083, 2087, 2096])
+    ports: List[int] = field(default_factory=lambda: list(DEFAULT_CF_TLS_PORTS))
     workers: int = DEFAULT_CONCURRENCY
     timeout: int = DEFAULT_TIMEOUT
     tcp_prefilter: bool = True

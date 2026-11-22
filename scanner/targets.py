@@ -17,7 +17,7 @@ from scanner.models import TargetSource
 
 logger = get_logger("targets")
 
-_IP_SYNTAX_RE = re.compile(r"^[\da-fA-F:\.\[\]/\-]+$")
+_IP_SYNTAX_RE = re.compile(r"^[\da-fA-F:\.\[\]/%-]+$")
 
 
 def clean_target_token(item: str) -> str:
@@ -87,17 +87,21 @@ def _build_isp_file_index(root: Path) -> List[Path]:
 
 def _resolve_target_file(raw_item: str, token: str, isp_index: Optional[List[Path]] = None) -> Optional[Path]:
     """Look for an existing file directly, in app_dir, or matching in ip-ranges."""
-    p = Path(raw_item)
+    if raw_item.startswith(("\\\\", "//")):
+        return None
+
     try:
+        p = Path(raw_item)
         if p.is_file():
             return p
-    except OSError:
+    except (OSError, ValueError):
         pass
-    alt = app_dir() / raw_item
+
     try:
+        alt = app_dir() / raw_item
         if alt.is_file():
             return alt
-    except OSError:
+    except (OSError, ValueError):
         pass
 
     # Skip slow catalog searches when the token already looks like an IP/CIDR/range literal
@@ -228,17 +232,92 @@ def _target_sources(
     return sources
 
 
-def _format_target_item(ip_int: int, port: Optional[int]) -> str:
-    ip_str = str(ipaddress.ip_address(ip_int))
+def _format_target_item(ip_int: int, port: Optional[int], version: int = 4) -> str:
+    if version == 6:
+        ip_str = str(ipaddress.IPv6Address(ip_int))
+    else:
+        ip_str = str(ipaddress.IPv4Address(ip_int))
     return format_host_port(ip_str, port) if port is not None else ip_str
 
 
+def _subtract_interval(base_start: int, base_end: int, sub_start: int, sub_end: int) -> List[Tuple[int, int]]:
+    """Subtract [sub_start, sub_end] from [base_start, base_end], returning 0, 1, or 2 disjoint intervals."""
+    if sub_end < base_start or sub_start > base_end:
+        return [(base_start, base_end)]
+    res: List[Tuple[int, int]] = []
+    if base_start < sub_start:
+        res.append((base_start, sub_start - 1))
+    if base_end > sub_end:
+        res.append((sub_end + 1, base_end))
+    return res
+
+
+def _merge_overlapping_sources(sources: List[TargetSource]) -> List[TargetSource]:
+    """Merge overlapping/adjacent sources per version and eliminate redundant port-specific overlaps."""
+    by_version: Dict[int, List[TargetSource]] = {}
+    for src in sources:
+        if src.size > 0:
+            by_version.setdefault(src.version, []).append(src)
+
+    merged: List[TargetSource] = []
+    for version, v_sources in by_version.items():
+        # 1. Merge all sources with port=None into non-overlapping wildcard intervals
+        wildcard_sources = [s for s in v_sources if s.port is None]
+        wildcard_intervals: List[Tuple[int, int]] = []
+        if wildcard_sources:
+            wildcard_sources.sort(key=lambda s: (s.start, s.end))
+            cur_start, cur_end, cur_label = wildcard_sources[0].start, wildcard_sources[0].end, wildcard_sources[0].label
+            for nxt in wildcard_sources[1:]:
+                if nxt.start <= cur_end + 1:
+                    cur_end = max(cur_end, nxt.end)
+                else:
+                    merged.append(TargetSource(start=cur_start, end=cur_end, version=version, label=cur_label, port=None))
+                    wildcard_intervals.append((cur_start, cur_end))
+                    cur_start, cur_end, cur_label = nxt.start, nxt.end, nxt.label
+            merged.append(TargetSource(start=cur_start, end=cur_end, version=version, label=cur_label, port=None))
+            wildcard_intervals.append((cur_start, cur_end))
+
+        # 2. Process sources with explicit ports, merging by port and removing overlap with wildcard intervals
+        explicit_sources = [s for s in v_sources if s.port is not None]
+        by_port: Dict[int, List[TargetSource]] = {}
+        for s in explicit_sources:
+            if s.port is not None:
+                by_port.setdefault(s.port, []).append(s)
+
+        for port, port_sources in by_port.items():
+            port_sources.sort(key=lambda s: (s.start, s.end))
+            cur_start, cur_end, cur_label = port_sources[0].start, port_sources[0].end, port_sources[0].label
+            grouped_intervals: List[Tuple[int, int, str]] = []
+            for nxt in port_sources[1:]:
+                if nxt.start <= cur_end + 1:
+                    cur_end = max(cur_end, nxt.end)
+                else:
+                    grouped_intervals.append((cur_start, cur_end, cur_label))
+                    cur_start, cur_end, cur_label = nxt.start, nxt.end, nxt.label
+            grouped_intervals.append((cur_start, cur_end, cur_label))
+
+            for g_start, g_end, g_label in grouped_intervals:
+                cur_slices = [(g_start, g_end)]
+                for w_start, w_end in wildcard_intervals:
+                    next_slices: List[Tuple[int, int]] = []
+                    for s_start, s_end in cur_slices:
+                        next_slices.extend(_subtract_interval(s_start, s_end, w_start, w_end))
+                    cur_slices = next_slices
+                    if not cur_slices:
+                        break
+                for s_start, s_end in cur_slices:
+                    merged.append(TargetSource(start=s_start, end=s_end, version=version, label=g_label, port=port))
+
+    return merged
+
+
 def _expand_sources_exact(sources: List[TargetSource], max_hosts: Optional[int] = None) -> List[str]:
+    sources = _merge_overlapping_sources(sources)
     out: List[str] = []
     seen = set()
     for src in sources:
         for n in range(src.start, src.end + 1):
-            item_str = _format_target_item(n, src.port)
+            item_str = _format_target_item(n, src.port, src.version)
             if item_str in seen:
                 continue
             seen.add(item_str)
@@ -248,27 +327,6 @@ def _expand_sources_exact(sources: List[TargetSource], max_hosts: Optional[int] 
                     f"Too many targets. Current limit is {max_hosts}. Use max_targets in config.txt to raise it."
                 )
     return out
-
-
-def _merge_overlapping_sources(sources: List[TargetSource]) -> List[TargetSource]:
-    """Merge overlapping or adjacent TargetSources per (version, port) before sampling."""
-    grouped: Dict[Tuple[int, Optional[int]], List[TargetSource]] = {}
-    for src in sources:
-        if src.size > 0:
-            grouped.setdefault((src.version, src.port), []).append(src)
-
-    merged: List[TargetSource] = []
-    for (version, port), group in grouped.items():
-        group.sort(key=lambda s: (s.start, s.end))
-        cur_start, cur_end, cur_label = group[0].start, group[0].end, group[0].label
-        for nxt in group[1:]:
-            if nxt.start <= cur_end + 1:
-                cur_end = max(cur_end, nxt.end)
-            else:
-                merged.append(TargetSource(start=cur_start, end=cur_end, version=version, label=cur_label, port=port))
-                cur_start, cur_end, cur_label = nxt.start, nxt.end, nxt.label
-        merged.append(TargetSource(start=cur_start, end=cur_end, version=version, label=cur_label, port=port))
-    return merged
 
 
 def _sample_sources_evenly(sources: List[TargetSource], max_hosts: int) -> List[str]:
@@ -285,29 +343,33 @@ def _sample_sources_evenly(sources: List[TargetSource], max_hosts: int) -> List[
         weights[src.version] = weights.get(src.version, 0) + min(src.size, 256)
         by_version.setdefault(src.version, []).append(src)
     grand_weight = sum(weights.values())
+    if grand_weight <= 0:
+        return []
+
+    # Largest Remainder Method (Hamilton-Hare)
     allocations: Dict[int, int] = {}
+    remainders: List[Tuple[float, int, int, int, int]] = []
     used = 0
-    remainders: List[Tuple[float, int]] = []
     for version, weight in weights.items():
         raw = (max_hosts * weight) / grand_weight
-        alloc = min(totals[version], max(1, int(raw)))
+        alloc = min(totals[version], int(raw))
         allocations[version] = alloc
         used += alloc
-        remainders.append((raw - int(raw), version))
-    while used > max_hosts:
-        cand_v: Optional[int] = max((v for v, a in allocations.items() if a > 1), key=lambda v: allocations[v], default=None)
-        if cand_v is None:
-            cand_v = max((v for v, a in allocations.items() if a > 0), key=lambda v: allocations[v], default=None)
-        if cand_v is None:
+        # Remainder tuple: (fraction, weight, total_hosts, IPv4 preference flag, version)
+        remainders.append((raw - int(raw), weight, totals[version], 1 if version == 4 else 0, version))
+
+    remainders.sort(key=lambda x: (x[0], x[1], x[2], x[3]), reverse=True)
+    while used < max_hosts:
+        gave_any = False
+        for _, _, _, _, version in remainders:
+            if used >= max_hosts:
+                break
+            if allocations[version] < totals[version]:
+                allocations[version] += 1
+                used += 1
+                gave_any = True
+        if not gave_any:
             break
-        allocations[cand_v] -= 1
-        used -= 1
-    for _, version in sorted(remainders, reverse=True):
-        if used >= max_hosts:
-            break
-        if allocations[version] < totals[version]:
-            allocations[version] += 1
-            used += 1
 
     out: List[str] = []
     seen = set()
@@ -330,7 +392,7 @@ def _sample_sources_evenly(sources: List[TargetSource], max_hosts: int) -> List[
             prev = cumulative[idx - 1] if idx > 0 else 0
             src = version_sources[idx]
             n = src.start + (pos - prev)
-            item_str = _format_target_item(n, src.port)
+            item_str = _format_target_item(n, src.port, src.version)
             if item_str not in seen:
                 seen.add(item_str)
                 out.append(item_str)

@@ -138,10 +138,10 @@ def test_detect_stage_flags_variants():
         )
     ]
     assert detect_stage_flags("clean_ips_longevity", recheck_longevity) == (
+        False,
+        False,
+        False,
         True,
-        False,
-        False,
-        False,
     )
 
     recheck_upload_only = [
@@ -155,8 +155,8 @@ def test_detect_stage_flags_variants():
         )
     ]
     assert detect_stage_flags("clean_ips_speed_tested", recheck_upload_only) == (
-        True,
         False,
+        True,
         False,
         False,
     )
@@ -264,4 +264,32 @@ def test_interactive_tui_passes_initial_ok_count_and_no_duplicate_recs(
     finally:
         close_logging()
         set_geoip_cache_dir(app_dir() / "results")
+
+
+def test_show_final_results_speed_stage_excludes_failed_speed_from_working_count(tmp_path, monkeypatch):
+    import scanner.ui.screens as screens_mod
+    from scanner.ui.screens import show_final_results
+
+    results = [
+        ScanResult(ip="104.16.1.1", port=443, ok=True, latency_ms=20.0, speed_mbps=25.0, download_bytes=100000),
+        ScanResult(ip="104.16.1.2", port=443, ok=True, latency_ms=25.0, speed_mbps=None, speed_error="Timeout"),
+    ]
+
+    captured_panels = []
+    real_print = screens_mod.console.print if screens_mod.console else print
+
+    def _spy_print(*args, **kwargs):
+        if args and hasattr(args[0], "renderable"):
+            captured_panels.append(str(args[0].renderable))
+        real_print(*args, **kwargs)
+
+    monkeypatch.setattr(screens_mod.console, "print", _spy_print)
+
+    txt_path = tmp_path / "clean_ips_full_tested.txt"
+    csv_path = tmp_path / "clean_ips_full_tested.csv"
+
+    show_final_results(results, txt_path, csv_path, filename_prefix="clean_ips_full_tested")
+
+    assert any("Working Endpoints: [bold green]1[/bold green]" in p or "Working Endpoints: 1" in p for p in captured_panels)
+    assert any("Failed Endpoints: [bold red]1[/bold red]" in p or "Failed Endpoints: 1" in p for p in captured_panels)
 

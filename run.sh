@@ -11,8 +11,11 @@ else
     exit 1
 fi
 
-# Install dependencies if needed
-$PYTHON_CMD -m pip install -q -r requirements.txt
+# Install dependencies only if missing
+if ! $PYTHON_CMD -c "import rich, requests" &>/dev/null; then
+    echo "[INFO] Installing required dependencies..."
+    $PYTHON_CMD -m pip install -q -r requirements.txt
+fi
 
 # Check if Xray Core exists
 if [ ! -f "core/xray" ] && [ ! -f "xray" ]; then

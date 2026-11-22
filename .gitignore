@@ -62,8 +62,6 @@ Thumbs.db
 .gemini/
 scratch/
 Help.txt
-Agents.md
-AGENTS.md
 
 # Private User Configuration (Never commit private VLESS keys)
 config.txt

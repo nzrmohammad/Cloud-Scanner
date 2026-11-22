@@ -17,6 +17,8 @@ def read_key() -> str:
         ch = msvcrt.getwch()  # type: ignore[attr-defined]
         if ch in {"\x00", "\xe0"}:
             ch2 = msvcrt.getwch()  # type: ignore[attr-defined]
+            if ch2 == "\x03":
+                raise KeyboardInterrupt
             return {
                 "H": "up",
                 "P": "down",

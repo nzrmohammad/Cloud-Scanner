@@ -9,8 +9,9 @@ from scanner.ui.terminal import (
     clear_screen,
     console,
     cprint,
+    is_back_value,
     make_fixed_header_panel,
-    prompt_str,
+    prompt_str_nav,
     render_stage,
 )
 
@@ -296,7 +297,7 @@ def _run_interactive_menu_loop(
             if typed:
                 raw = typed.strip().lower()
                 typed = ""
-                if allow_back and raw in {"b", "back", "0", "q", "quit", "exit"}:
+                if allow_back and is_back_value(raw):
                     raise NavigationBack
                 if multi:
                     try:
@@ -384,9 +385,14 @@ def key_select_menu(
     if not terminal_supports_keys():
         _render_non_tty_fallback_menu(title, rows, multi=False, allow_back=allow_back, top_panel=top_panel)
         while True:
-            raw = prompt_str("Select item" + (" / b=back" if allow_back else ""), str(default_index + 1)).strip().lower()
-            if allow_back and raw in {"b", "back", "0", "q", "quit", "exit"}:
-                raise NavigationBack
+            try:
+                raw = prompt_str_nav("Select item", default=str(default_index + 1), allow_back=allow_back).strip()
+            except NavigationBack:
+                raise
+            except EOFError:
+                if allow_back:
+                    raise NavigationBack from None
+                return default_index
             if raw.isdigit() and 1 <= int(raw) <= len(rows):
                 return int(raw) - 1
             cprint(f"Please choose 1-{len(rows)}.", "yellow")
@@ -405,9 +411,14 @@ def key_multi_select_menu(title: str, rows: List[Tuple[str, str]], allow_back: b
         _render_non_tty_fallback_menu(title, rows, multi=True, allow_back=allow_back)
         cprint("Select one or more items. Examples: 1 | 1,3,5 | 2-6 | all | b=back", "dim")
         while True:
-            raw = prompt_str("Selection", "all")
-            if allow_back and raw.strip().lower() in {"b", "back", "0", "q", "quit", "exit"}:
-                raise NavigationBack
+            try:
+                raw = prompt_str_nav("Selection", default="all", allow_back=allow_back)
+            except NavigationBack:
+                raise
+            except EOFError:
+                if allow_back:
+                    raise NavigationBack from None
+                return list(range(len(rows)))
             try:
                 return parse_multi_select(raw, len(rows))
             except Exception as exc:

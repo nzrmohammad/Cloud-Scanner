@@ -280,3 +280,91 @@ def test_save_results_recheck_upload_only_keeps_full_columns(tmp_path):
     assert "14.5" in txt_content
 
 
+def test_stale_artifacts_cleaned_when_zero_working(tmp_path):
+    # Pre-create stale vless and by_port files
+    stale_vless = tmp_path / "clean_ips_vless.txt"
+    stale_vless.write_text("vless://stale-old-link@1.1.1.1:443#Old\n", encoding="utf-8")
+    by_port = tmp_path / "by_port"
+    by_port.mkdir()
+    (by_port / "clean_ips_port_443.txt").write_text("old content\n", encoding="utf-8")
+
+    v = VlessConfig(uuid="test-uuid", host="test.com", port=443)
+    failed = [ScanResult(ip="104.16.1.1", port=443, ok=False, error="Timeout")]
+    save_results(failed, tmp_path, "clean_ips", vless_config=v)
+
+    # Stale VLESS should be overwritten with empty notice, not left with obsolete links
+    assert "No working endpoints found" in stale_vless.read_text(encoding="utf-8")
+    assert not (by_port / "clean_ips_port_443.txt").exists()
+
+
+def test_save_recommended_configs_empty_overwrites_stale(tmp_path):
+    rec_file = tmp_path / "recommended_configs.txt"
+    rec_file.write_text("Old obsolete recommendations\n", encoding="utf-8")
+
+    result_path = save_recommended_configs([], tmp_path)
+    assert result_path == rec_file
+    content = rec_file.read_text(encoding="utf-8")
+    assert "No recommended endpoints available for this scan run" in content
+
+
+def test_summary_report_masks_uuid_and_keeps_section_numbering(tmp_path):
+    v = VlessConfig(uuid="12345678-abcd-ef01-2345-6789abcdef01", host="example.com", port=443)
+    r = ScanResult(ip="104.16.1.1", port=443, ok=True, latency_ms=45.0)
+
+    report_path = save_scan_summary_report([r], tmp_path, vless_config=v, recommendations=None)
+    content = report_path.read_text(encoding="utf-8")
+
+    # UUID should be masked
+    assert "12345678..." in content
+    assert "6789abcdef01" not in content
+
+    # Section 3 should be present with fallback message, no jump from 2 to 4
+    assert "2. STAGE-BY-STAGE FUNNEL STATISTICS" in content
+    assert "3. SMART RECOMMENDATIONS" in content
+    assert "4. DETAILED ENDPOINT BENCHMARK TABLE" in content
+    assert "(No smart recommendations available for this scan run)" in content
+
+
+def test_clean_error_message_simplifies_exception_repr():
+    from scanner.storage import _clean_error_message
+
+    raw = "('Connection aborted.', RemoteDisconnected('Remote end closed connection without response'))"
+    cleaned = _clean_error_message(raw)
+    assert cleaned == "Connection aborted."
+
+    pool_err = "HTTPSConnectionPool(host='cp.cloudflare.com', port=443): Read timed out."
+    cleaned_pool = _clean_error_message(pool_err)
+    assert "Read timed out." in cleaned_pool
+
+    tuple_pool_err = "(\"HTTPSConnectionPool(host='example.com', port=443): Max retries exceeded\", 123)"
+    cleaned_tuple_pool = _clean_error_message(tuple_pool_err)
+    assert cleaned_tuple_pool == "Max retries exceeded"
+
+
+
+def test_by_port_cleanup_does_not_delete_other_stage_prefixes(tmp_path):
+    by_port = tmp_path / "by_port"
+    by_port.mkdir()
+    other_stage_file = by_port / "clean_ips_full_tested_port_443.txt"
+    other_stage_file.write_text("stage content\n", encoding="utf-8")
+
+    r1 = ScanResult(ip="104.16.1.1", port=443, ok=True, latency_ms=50.0)
+    r2 = ScanResult(ip="104.16.1.2", port=8443, ok=True, latency_ms=60.0)
+
+    save_results([r1, r2], tmp_path, "clean_ips")
+
+    assert (by_port / "clean_ips_port_443.txt").exists()
+    assert (by_port / "clean_ips_port_8443.txt").exists()
+    # The other stage's files must not be wiped out by clean_ips save
+    assert other_stage_file.exists()
+    assert other_stage_file.read_text(encoding="utf-8") == "stage content\n"
+
+    # Now simulate a subsequent single-port scan for clean_ips: it should clean stale clean_ips files
+    r_single = ScanResult(ip="104.16.1.1", port=443, ok=True, latency_ms=50.0)
+    save_results([r_single], tmp_path, "clean_ips")
+
+    assert not (by_port / "clean_ips_port_8443.txt").exists()
+    assert other_stage_file.exists()
+
+
+

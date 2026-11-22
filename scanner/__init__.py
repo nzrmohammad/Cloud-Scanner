@@ -2,13 +2,14 @@
 
 from scanner.app import CloudScannerApp
 from scanner.config import ConfigManager
+from scanner.constants import APP_CHANNEL, APP_VERSION
 from scanner.engine import ScannerEngine
 from scanner.models import AppSettings, ScanResult, VlessConfig
 from scanner.storage import ResultExporter
 
-__version__ = "0.3.0"
+__version__ = APP_VERSION.lstrip("v")
 __author__ = "Mohammad"
-__channel__ = "@Nzrmohammad"
+__channel__ = APP_CHANNEL
 
 __all__ = [
     "CloudScannerApp",

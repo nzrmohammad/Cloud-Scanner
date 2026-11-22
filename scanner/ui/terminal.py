@@ -9,7 +9,7 @@ if sys.platform == "win32":
             sys.stdout.reconfigure(encoding="utf-8", errors="replace")
         if hasattr(sys.stderr, "reconfigure"):
             sys.stderr.reconfigure(encoding="utf-8", errors="replace")
-    except Exception:
+    except (AttributeError, OSError, ValueError):
         pass
     try:
         import ctypes
@@ -19,7 +19,7 @@ if sys.platform == "win32":
         _mode = ctypes.c_ulong()
         if _kernel32.GetConsoleMode(_stdout_handle, ctypes.byref(_mode)):
             _kernel32.SetConsoleMode(_stdout_handle, _mode.value | 0x0004)  # ENABLE_VIRTUAL_TERMINAL_PROCESSING
-    except Exception:
+    except (AttributeError, OSError):
         pass
 
 from scanner.constants import APP_CHANNEL, APP_HEADER, APP_NAME, APP_VERSION
@@ -59,7 +59,7 @@ except ImportError:
     console = None  # type: ignore
     RICH = False
 
-BACK_WORDS = {"b", "back", "q", "quit", "exit"}
+BACK_WORDS = {"b", "back", "q", "quit", "exit", "0"}
 
 
 def is_back_value(value: str) -> bool:
@@ -87,7 +87,7 @@ def tui_screen() -> Generator[None, None, None]:
         if RICH and console is not None and getattr(console, "is_terminal", False):
             try:
                 console.show_cursor(True)
-            except Exception:
+            except (AttributeError, OSError):
                 pass
         else:
             real_stdout = getattr(sys, "__stdout__", None) or sys.stdout
@@ -95,7 +95,7 @@ def tui_screen() -> Generator[None, None, None]:
                 try:
                     real_stdout.write("\033[?25h")
                     real_stdout.flush()
-                except Exception:
+                except (AttributeError, OSError):
                     pass
 
 
@@ -137,7 +137,7 @@ def _win32_clear_console_buffer() -> bool:
         kernel32.FillConsoleOutputAttribute(handle, csbi.wAttributes, total_cells, origin, ctypes.byref(written))
         kernel32.SetConsoleCursorPosition(handle, origin)
         return True
-    except Exception:
+    except (AttributeError, OSError, ValueError):
         return False
 
 
@@ -145,7 +145,7 @@ def clear_screen() -> None:
     """Reliably clear the entire terminal viewport and scrollback without sub-shells."""
     try:
         sys.stdout.flush()
-    except Exception:
+    except (AttributeError, OSError):
         pass
     if os.name == "nt" and (not RICH or console is None or getattr(console, "legacy_windows", False)):
         if _win32_clear_console_buffer():
@@ -163,13 +163,13 @@ def clear_screen() -> None:
             tty_out.write("\033[2J\033[3J\033[H")
             tty_out.flush()
             return
-        except Exception:
+        except (AttributeError, OSError):
             pass
     if RICH and console is not None and getattr(console, "is_terminal", False):
         try:
             console.clear()
             return
-        except Exception:
+        except (AttributeError, OSError):
             pass
     print("\n" * 4, end="")
 
@@ -247,47 +247,53 @@ def pause(message: str = "Press Enter to continue") -> None:
             input(message)
     except KeyboardInterrupt:
         raise
+    except EOFError:
+        pass
 
 
 def prompt_str(message: str, default: Optional[str] = None, password: bool = False) -> str:
-    if RICH and Prompt is not None:
-        show_def = bool(default)
-        res = Prompt.ask(message, default=default, show_default=show_def, password=password)
-        return (res or "").strip()
-    suffix = f" [{default}]" if default else ""
-    val = input(f"{message}{suffix}: ").strip()
-    return val or (default or "")
+    try:
+        if RICH and Prompt is not None:
+            show_def = bool(default)
+            res = Prompt.ask(message, default=default, show_default=show_def, password=password)
+            return (res or "").strip()
+        suffix = f" [{default}]" if default else ""
+        val = input(f"{message}{suffix}: ").strip()
+        return val or (default or "")
+    except EOFError:
+        return default or ""
 
 
 def prompt_int(message: str, default: int, min_value: int = 1, max_value: Optional[int] = None) -> int:
-    while True:
-        try:
-            if RICH and IntPrompt is not None:
-                value = IntPrompt.ask(message, default=default)
-            else:
-                raw = input(f"{message} [{default}]: ").strip()
-                value = int(raw or default)
-            if value < min_value or (max_value is not None and value > max_value):
-                raise ValueError
-            return value
-        except (EOFError, KeyboardInterrupt):
-            raise
-        except Exception:
-            cprint(f"Please enter a number between {min_value} and {max_value or 'unlimited'}.", "yellow")
+    return prompt_int_nav(message, default=default, min_value=min_value, max_value=max_value, allow_back=False)
 
 
 def prompt_confirm(message: str, default: bool = True) -> bool:
-    if RICH and Confirm is not None:
-        return Confirm.ask(message, default=default)
-    raw = input(f"{message} [{'Y/n' if default else 'y/N'}]: ").strip().lower()
-    if not raw:
+    try:
+        if RICH and Confirm is not None:
+            return Confirm.ask(message, default=default)
+        raw = input(f"{message} [{'Y/n' if default else 'y/N'}]: ").strip().lower()
+        if not raw:
+            return default
+        return raw in {"y", "yes", "1", "true"}
+    except EOFError:
         return default
-    return raw in {"y", "yes", "1", "true"}
 
 
 def prompt_str_nav(message: str, default: Optional[str] = None, password: bool = False, allow_back: bool = True) -> str:
     """Prompt for text and allow b/back to navigate to the previous TUI stage."""
-    raw = prompt_str(message, default=default, password=password)
+    try:
+        if RICH and Prompt is not None:
+            show_def = bool(default)
+            res = Prompt.ask(message, default=default, show_default=show_def, password=password)
+            raw = (res or "").strip()
+        else:
+            suffix = f" [{default}]" if default else ""
+            raw = input(f"{message}{suffix}: ").strip() or (default or "")
+    except EOFError:
+        if allow_back:
+            raise NavigationBack from None
+        return default or ""
     if allow_back and is_back_value(raw):
         raise NavigationBack
     return raw
@@ -321,30 +327,40 @@ def prompt_int_nav(message: str, default: int, min_value: int = 1, max_value: Op
 def prompt_confirm_nav(message: str, default: bool = True, allow_back: bool = True) -> bool:
     """Yes/no prompt that supports b/back. Returns True/False, raises NavigationBack on back."""
     while True:
-        if RICH and Prompt is not None:
-            suffix = "Y/n" if default else "y/N"
-            raw = Prompt.ask(f"{message} [dim]({suffix}, b=back)[/dim]", default="y" if default else "n")
-        else:
-            raw = input(f"{message} [{'Y/n' if default else 'y/N'} / b=back]: ").strip().lower()
-            if not raw:
-                raw = "y" if default else "n"
-        raw = str(raw).strip().lower()
-        if allow_back and is_back_value(raw):
-            raise NavigationBack
-        if raw in {"y", "yes", "1", "true"}:
-            return True
-        if raw in {"n", "no", "0", "false"}:
-            return False
-        cprint("Please answer y/n, or type b to go back.", "yellow")
+        try:
+            if RICH and Prompt is not None:
+                suffix = "Y/n" if default else "y/N"
+                raw = Prompt.ask(f"{message} [dim]({suffix}, b=back)[/dim]", default="y" if default else "n")
+            else:
+                raw = input(f"{message} [{'Y/n' if default else 'y/N'} / b=back]: ").strip().lower()
+                if not raw:
+                    raw = "y" if default else "n"
+            raw = str(raw).strip().lower()
+            if raw in {"y", "yes", "1", "true"}:
+                return True
+            if raw in {"n", "no", "0", "false"}:
+                return False
+            if allow_back and is_back_value(raw):
+                raise NavigationBack
+            cprint("Please answer y/n, or type b to go back.", "yellow")
+        except EOFError:
+            if allow_back:
+                raise NavigationBack from None
+            return default
 
 
 def prompt_continue_nav(message: str = "Press Enter to continue", allow_back: bool = True) -> None:
     """Enter continues; b/back returns to the previous step."""
-    if RICH and Prompt is not None:
-        label = message + (" [dim](b=back)[/dim]" if allow_back else "")
-        raw = Prompt.ask(label, default="", show_default=False)
-    else:
-        raw = input(message + (" / b=back" if allow_back else "") + ": ").strip()
+    try:
+        if RICH and Prompt is not None:
+            label = message + (" [dim](b=back)[/dim]" if allow_back else "")
+            raw = Prompt.ask(label, default="", show_default=False)
+        else:
+            raw = input(message + (" / b=back" if allow_back else "") + ": ").strip()
+    except EOFError:
+        if allow_back:
+            raise NavigationBack from None
+        return
     if allow_back and is_back_value(str(raw)):
         raise NavigationBack
 
@@ -379,18 +395,20 @@ def progress_reporter(stage_title: str, total: int, mode: str = "latency") -> Ge
                         err = r.speed_error or r.upload_error or "failed"
                         console.print(f"[yellow]SPD-FAIL[/yellow] {r.endpoint:<38} {err}")
                 elif mode == "recheck":
-                    if r.ok and r.packet_loss < 100.0:
+                    if r.ok and (r.packet_loss is None or r.packet_loss < 100.0):
                         loss_txt = f" loss {r.packet_loss:.0f}%" if r.packet_loss is not None else ""
                         jit_txt = f" jit {r.jitter_ms:.1f}ms" if r.jitter_ms is not None else ""
-                        console.print(f"[bright_green]RE-OK[/bright_green] {r.endpoint:<38} [bold]{lat_txt} avg[/bold]{jit_txt}{loss_txt}  pass {r.recheck_passed}/{r.recheck_total}")
+                        console.print(f"[bright_green]RE-OK[/bright_green] {r.endpoint:<38} [bold]{lat_txt} med[/bold]{jit_txt}{loss_txt}  pass {r.recheck_passed}/{r.recheck_total}")
                     else:
                         console.print(f"[red]DROP[/red]  {r.endpoint:<38} {r.error}")
                 elif mode == "longevity":
                     loss_s = f" loss {r.longevity_loss:.0f}%" if r.longevity_loss is not None else ""
-                    if r.sustained:
+                    if r.sustained is True:
                         console.print(f"[bright_green]SUSTAIN[/bright_green] {r.endpoint:<38} [bold]connection held steady[/bold]{loss_s}")
-                    else:
+                    elif r.sustained is False:
                         console.print(f"[yellow]DROP[/yellow]    {r.endpoint:<38} [dim]DPI dropped/throttled connection{loss_s}[/dim]")
+                    else:
+                        console.print(f"[red]ERROR[/red]   {r.endpoint:<38} [dim]{r.error or 'aborted/untested'}[/dim]")
                 progress.advance(task)
 
             yield _rich_cb
@@ -405,7 +423,12 @@ def progress_reporter(stage_title: str, total: int, mode: str = "latency") -> Ge
             elif mode == "recheck" and r.ok:
                 print(f"RE-OK {r.endpoint:<45} {lat_txt}")
             elif mode == "longevity":
-                status = "SUSTAIN" if r.sustained else "DROP"
+                if r.sustained is True:
+                    status = "SUSTAIN"
+                elif r.sustained is False:
+                    status = "DROP"
+                else:
+                    status = "ERR"
                 print(f"{status} {r.endpoint:<45}")
             print(f"{stage_title} progress: {completed}/{total_items}", end="\r")
 
